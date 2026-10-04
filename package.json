@@ -16,6 +16,7 @@
     "@earendil-works/pi-ai": "^1.0.2",
     "@earendil-works/pi-codemode": "^1.0.2",
     "@earendil-works/pi-durable": "^1.0.2",
+    "effect": "^3.19.15",
     "quickjs-wasi": "^3.6.2"
   },
   "devDependencies": {

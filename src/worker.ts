@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { configure, type EntryId, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord";
-import Value from "typebox/value";
+import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
@@ -20,17 +20,21 @@ import { EXECUTOR, MARKS, MASTER, SELF, SUBAGENT, VIEW_DOC } from "./prompts.ts"
 import { DoSqlite } from "./sql.ts";
 import type { Computer } from "./box.ts";
 export { Computer } from "./box.ts";
-import { type App, codemode, describe, type Freezer, type Frozen, type Nested } from "./codemode.ts";
+import { type App, codemode, describe, type Freezer, type Nested } from "./codemode.ts";
 import { Mcp } from "./mcp.ts";
+import { agent, type AgentHost } from "./agents.ts";
+import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, send as deliver, tag } from "./channels/index.ts";
+import * as frozen from "./freezer.ts";
+import { bash, Box, BoxLive, runner, Storage } from "./fx.ts";
+import { JobHost, Jobs, JobsLive } from "./jobs.ts";
 import { OAuth } from "./oauth.ts";
 import settings from "./settings.html";
 import tree from "./tree.html";
 import ui from "./ui.html";
 
-type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; SPECTRUM_WEBHOOK_SECRET: string; AI: Ai };
+type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
 
-type Origin = { channel: string; to: string };
-type Job = { id: number; label: string; code: string; deadline: number; from: Origin; status: string; started: number; ended?: number };
+type Services = Storage | Box | Jobs | JobHost;
 
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
@@ -72,6 +76,8 @@ export class Raubot extends DurableObject<Env> {
 	#delivering = false;
 	#marks = 0;
 	#prompt = "";
+	#fx!: <A, E>(e: Effect.Effect<A, E, Services>) => Promise<A>;
+	#channels!: Channels;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -106,6 +112,22 @@ export class Raubot extends DurableObject<Env> {
 
 	async #init() {
 		this.oauth = new OAuth(this.ctx.storage, this.env.EXECUTOR_URL);
+		this.#channels = channels(this.env);
+		const host = Layer.succeed(JobHost, {
+			run: async (job, signal) => {
+				const store = (await this.ctx.storage.get<Record<string, unknown>>("codemode-store")) ?? {};
+				const freezer = this.#freezer(`job:${job.id}`);
+				const r = await codemode(job.code, this.#tools(`job:${job.id}`), store, signal, this.#app, freezer, job.deadline);
+				await freezer.clear();
+				return r;
+			},
+			bump: (from, text) => this.send(text, from),
+			stopChildren: async (id) => {
+				for (const c of (await this.ctx.storage.list<number>({ prefix: `agent:job:${id}:` })).values()) await (await this.harness.conversation(c as never, C))?.abort(C);
+			},
+		});
+		const base = Layer.mergeAll(Layer.succeed(Storage, this.ctx.storage), BoxLive(this.env.BOX), host);
+		this.#fx = runner(ManagedRuntime.make(Layer.provideMerge(JobsLive, base)));
 		const models = createModels({ authContext: { env: async (n) => (this.env as unknown as Record<string, string>)[n], fileExists: async () => false } });
 		models.setProvider(openaiProvider());
 		models.setProvider(anthropicProvider());
@@ -127,7 +149,7 @@ export class Raubot extends DurableObject<Env> {
 				name: "bash",
 				description: "Run a bash command in your Linux box (cwd /workspace). Output is combined stdout+stderr with the exit code. Default timeout 120s, max 900s.",
 				inputSchema: Type.Object({ cmd: Type.String(), timeout: Type.Optional(Type.Integer()) }),
-				execute: ({ cmd, timeout }: { cmd: string; timeout?: number }) => this.env.BOX.getByName("main").bash(cmd, Math.min(timeout ?? 120, 900)),
+				execute: ({ cmd, timeout }: { cmd: string; timeout?: number }) => this.#fx(bash(cmd, Math.min(timeout ?? 120, 900))),
 			},
 			{
 				name: "zoom",
@@ -167,17 +189,17 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			inputSchema: Type.Object({ task: Type.String(), schema: Type.Optional(Type.Unknown()) }),
 			execute: () => Promise.reject(new Error("unbound")),
 		};
-		const system = `${MASTER}\n\n${VIEW_DOC}\n\n${SELF}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
+		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
 		nested.push(agentDoc, {
 			name: "jobs",
 			description: "Your background jobs, newest first: { id, label, status, started, ended, deadline }. `cancel: [ids]` stops running ones (no result comes back); `prune: true` forgets finished ones.",
 			inputSchema: Type.Object({ cancel: Type.Optional(Type.Array(Type.Integer())), prune: Type.Optional(Type.Boolean()) }),
-			execute: async ({ cancel = [], prune }: { cancel?: number[]; prune?: boolean }) => {
-				for (const id of cancel) await this.#cancel(id);
-				const jobs = await this.#jobs();
-				if (prune) await this.ctx.storage.delete(jobs.filter((j) => j.status !== "running").map((j) => `job:${j.id}`));
-				return jobs.filter((j) => !prune || j.status === "running").reverse().map(({ code: _, from: __, ...j }) => j);
-			},
+			execute: ({ cancel = [], prune }: { cancel?: number[]; prune?: boolean }) => this.#fx(Effect.gen(function* () {
+				const jobs = yield* Jobs;
+				yield* Effect.forEach(cancel, jobs.cancel);
+				if (prune) yield* jobs.prune();
+				return (yield* jobs.list()).reverse().map(({ code: _, from: __, ...j }) => j);
+			})),
 		});
 		this.#tools = (scope, owner) => nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(scope, owner) } : t));
 		this.#app = executor.app;
@@ -195,7 +217,10 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				execute: async ({ code, background }, api, ctx) => {
 					if (background) {
 						if (api.conversationId !== this.root.id) throw new Error("Only raubot can start background jobs.");
-						return { content: [{ type: "text", text: await this.#start(code, background.label, background.timeout) }] };
+						const from = (await this.ctx.storage.get<Origin>("reply")) ?? APP;
+						const { label, timeout } = background;
+						const job = await this.#fx(Effect.flatMap(Jobs, (j) => j.start(code, label, timeout, { channel: from.channel, to: from.to })));
+						return { content: [{ type: "text", text: `Started job ${job.id} (${label}). Its result will come back to you as a job message.` }] };
 					}
 					const store = (await this.ctx.storage.get<Record<string, unknown>>("codemode-store")) ?? {};
 					const tools = this.#tools(String(api.taskId), { api, ctx });
@@ -234,7 +259,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			void this.#deliver().catch((e) => console.error("deliver", e));
 		});
 		this.harness.resume();
-		void this.#resumeJobs();
+		await this.#fx(Effect.flatMap(Jobs, (j) => j.resume()));
 		await this.#sync();
 		this.memory.pump();
 		this.#changed();
@@ -301,21 +326,6 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		};
 	}
 
-	/** Spectrum webhook HMAC: hex SHA-256 of `v0:{timestamp}:{body}`, at most 5 minutes old. */
-	async #signed(h: Headers, body: string) {
-		const ts = h.get("x-spectrum-timestamp") ?? "", sig = h.get("x-spectrum-signature") ?? "";
-		if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
-		const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(this.env.SPECTRUM_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-		const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`v0:${ts}:${body}`)));
-		return sig === `v0=${[...mac].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
-	}
-
-	/** Where a channel's replies go. The app needs none: it shows the whole chat. */
-	#channels: Record<string, (to: string, text: string) => Promise<unknown>> = {
-		// Spectrum's SDK is gRPC, so the box sends the text.
-		imessage: (to, text) => this.env.BOX.getByName("main").bash(`# imessage reply\ngit -C raubot fetch -q && git -C raubot checkout -q origin/main -- imessage && cd raubot/imessage && { [ -d node_modules ] || npm i -s; } && SPACE='${to.replace(/'/g, "")}' TEXT_B64=${btoa(String.fromCharCode(...new TextEncoder().encode(text)))} node send.mjs`, 120),
-	};
-
 	/** Once the turn ends, its final reply goes back to the channel that started it. Stored, so a restart mid-turn still delivers. */
 	async #deliver() {
 		const r = await this.ctx.storage.get<Origin & { start: number }>("reply");
@@ -325,136 +335,54 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		this.#delivering = true;
 		try {
 			await this.ctx.storage.delete("reply");
-			console.log(r.channel, await this.#channels[r.channel]!(r.to, reply));
+			await this.#fx(deliver(this.#channels, r, reply));
 		} finally { this.#delivering = false; }
 	}
 
-	/** A running script's frozen VM, gzipped in 1 MB chunks (the per-value limit is 2 MB). */
+	/** Promise view of the freezer for codemode; saves are queued so an older image never lands after a newer one. */
 	#freezer(task: string): Freezer & { clear(): Promise<void> } {
 		const key = `frozen:${task}`;
 		let chain = Promise.resolve();
-		const zip = (b: Uint8Array, z: CompressionStream | DecompressionStream) => new Response(new Blob([b]).stream().pipeThrough(z)).bytes();
 		return {
-			load: async () => {
-				const f = await this.ctx.storage.get<Omit<Frozen, "image"> & { n: number }>(key);
-				if (!f) return undefined;
-				const parts = await this.ctx.storage.get<Uint8Array>(Array.from({ length: f.n }, (_, i) => `${key}:${i}`));
-				return { ...f, image: await zip(new Uint8Array(await new Blob([...parts.values()]).arrayBuffer()), new DecompressionStream("gzip")) };
-			},
-			save: (f) => (chain = chain.then(async () => {
-				const z = await zip(f.image, new CompressionStream("gzip"));
-				const n = Math.ceil(z.length / (1 << 20));
-				const entries: Record<string, unknown> = { [key]: { ...f, image: undefined, n } };
-				for (let i = 0; i < n; i++) entries[`${key}:${i}`] = z.slice(i << 20, (i + 1) << 20);
-				await this.ctx.storage.put(entries);
-			}).catch((e) => console.error("freeze", e))),
-			clear: async () => {
-				await chain;
-				const keys = [...(await this.ctx.storage.list({ prefix: key })).keys()];
-				if (keys.length) await this.ctx.storage.delete(keys);
-			},
+			load: () => this.#fx(frozen.load(key)),
+			save: (f) => (chain = chain.then(() => this.#fx(frozen.save(key, f))).catch((e) => console.error("freeze", e))),
+			clear: async () => { await chain; await this.#fx(frozen.clear(key)); },
 		};
 	}
 
-	/** `tools.agent`: a child conversation owned by the codemode call, keyed by the script's call id so a thawed script finds it again. */
+	/** `tools.agent`: a child conversation keyed by the script's call id, so a thawed script finds it again. A foreground call owns its children (Esc stops them); a background job's are ownerless. */
 	#agent(scope: string, owner?: { api: ToolExecutionApi; ctx: Context }) {
 		const ctx = owner?.ctx ?? C;
-		return async ({ task, schema }: { task: string; schema?: object }, call: number) => {
-			if (owner && owner.api.conversationId !== this.root.id) throw new Error("A subagent can't start subagents.");
-			const key = `agent:${scope}:${call}`;
-			let id = await this.ctx.storage.get<number>(key);
-			if (!id) {
-				// A foreground call owns its children (Esc stops them); a background job's children are ownerless.
-				id = owner
-					? await owner.api.commit(async (tx) => {
-						const c = await tx.createConversation({ ownership: { kind: "task", taskId: owner.api.taskId } });
-						await configure(tx, c.id, { instructions: SUBAGENT });
-						return c.id as unknown as number;
-					}, ctx)
-					: await (async () => {
-						const c = await this.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium", instructions: SUBAGENT } }, C);
-						return c.id as unknown as number;
-					})();
-				await this.ctx.storage.put(key, id);
-			}
-			const child = (owner ? await owner.api.conversation(id as never, ctx) : await this.harness.conversation(id as never, C))!;
-			const ask = async (content: string, n: number) => {
-				await (await child.submit({ type: "input", content, requestId: `${key}:${n}` }, ctx)).wait(ctx);
+		const host: AgentHost = {
+			create: async () => (owner
+				? await owner.api.commit(async (tx) => {
+					const c = await tx.createConversation({ ownership: { kind: "task", taskId: owner.api.taskId } });
+					await configure(tx, c.id, { instructions: SUBAGENT });
+					return c.id;
+				}, ctx)
+				: (await this.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium", instructions: SUBAGENT } }, C)).id) as unknown as number,
+			ask: async (id, content, requestId) => {
+				const child = (owner ? await owner.api.conversation(id as never, ctx) : await this.harness.conversation(id as never, C))!;
+				await (await child.submit({ type: "input", content, requestId }, ctx)).wait(ctx);
 				const page = await (await this.harness.conversation(id as never, C))!.entries({}, 50, undefined, C);
 				for (const e of page.items) for (const m of [...(e.model ?? [])].reverse()) if (m.role === "assistant") { const t = text(m.content); if (t) return t; }
 				return "";
-			};
-			const shape = schema && `\n\nReply with only JSON (no prose, no code fence) matching this JSON Schema:\n${JSON.stringify(schema)}`;
-			let reply = await ask(`Task: ${task}${shape ?? ""}`, 0);
-			if (!schema) return reply;
-			for (let n = 1; ; n++) {
-				let v: unknown, err: string;
-				try {
-					v = JSON.parse(reply.replace(/^```(?:json)?\s*|\s*```$/g, ""));
-					if (Value.Check(schema, v)) return v;
-					err = [...Value.Errors(schema, v)].slice(0, 5).map((e) => `${e.instancePath || "/"} ${e.message}`).join("; ");
-				} catch (e) { err = String(e); }
-				if (n > 2) throw new Error(`Subagent reply doesn't match the schema: ${err}`);
-				reply = await ask(`That reply doesn't match the schema (${err}). Reply again with only the JSON.${shape}`, n);
-			}
+			},
+		};
+		return (args: { task: string; schema?: object }, call: number) => {
+			if (owner && owner.api.conversationId !== this.root.id) return Promise.reject(new Error("A subagent can't start subagents."));
+			return this.#fx(agent(host, `agent:${scope}:${call}`, args));
 		};
 	}
 
 	#tools!: (scope: string, owner?: { api: ToolExecutionApi; ctx: Context }) => Nested[];
 	#app?: App;
-	#running = new Map<number, AbortController>();
-
-	async #jobs() { return [...(await this.ctx.storage.list<Job>({ prefix: "job:" })).values()].sort((a, b) => a.id - b.id); }
-
-	/** A background job is a codemode script the DO runs outside any turn; it inherits the turn's channel and reports back as a `job` message. */
-	async #start(code: string, label: string, timeout: number) {
-		if ((await this.#jobs()).filter((j) => j.status === "running").length >= 100) throw new Error("100 jobs are already running: cancel some first.");
-		const id = (await this.ctx.storage.get<number>("job-next")) ?? 1;
-		const from = (await this.ctx.storage.get<Origin>("reply")) ?? { channel: "app", to: "" };
-		const job: Job = { id, label, code, from: { channel: from.channel, to: from.to }, status: "running", started: Date.now(), deadline: Date.now() + Math.min(Math.max(timeout, 1), 86_400) * 1000 };
-		await this.ctx.storage.put({ "job-next": id + 1, [`job:${id}`]: job });
-		void this.#run(job);
-		await this.ctx.storage.setAlarm(Date.now() + 30_000);
-		return `Started job ${id} (${label}). Its result will come back to you as a job message.`;
-	}
-
-	async #run(job: Job) {
-		if (this.#running.has(job.id)) return;
-		const ac = new AbortController();
-		this.#running.set(job.id, ac);
-		const freezer = this.#freezer(`job:${job.id}`);
-		const store = (await this.ctx.storage.get<Record<string, unknown>>("codemode-store")) ?? {};
-		const r = await codemode(job.code, this.#tools(`job:${job.id}`), store, ac.signal, this.#app, freezer, job.deadline);
-		this.#running.delete(job.id);
-		await freezer.clear();
-		const now = await this.ctx.storage.get<Job>(`job:${job.id}`);
-		if (!now || now.status !== "running") return; // cancelled or cleared
-		const status = !r.error ? "done" : Date.now() > job.deadline ? "timed out" : "failed";
-		await this.ctx.storage.put(`job:${job.id}`, { ...now, status, ended: Date.now() });
-		await this.send(`[job ${job.id} ${status}] ${job.label}\n${r.text}`, job.from);
-	}
-
-	async #cancel(id: number) {
-		const job = await this.ctx.storage.get<Job>(`job:${id}`);
-		if (job?.status !== "running") return;
-		await this.ctx.storage.put(`job:${id}`, { ...job, status: "cancelled", ended: Date.now() });
-		this.#running.get(id)?.abort();
-		for (const c of (await this.ctx.storage.list<number>({ prefix: `agent:job:${id}:` })).values()) await (await this.harness.conversation(c as never, C))?.abort(C);
-	}
-
-	/** Picks up jobs a restart interrupted; returns whether any still run. */
-	async #resumeJobs() {
-		const running = (await this.#jobs()).filter((j) => j.status === "running");
-		for (const j of running) void this.#run(j);
-		return running.length > 0;
-	}
-
 	busy() { return (this.state.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; }
 
 	/** Every message comes from a channel; non-app ones are tagged for the model and get the turn's reply. */
-	async send(input: string, from: Origin = { channel: "app", to: "" }) {
-		if (from.channel !== "app") {
-			input = `[via ${from.channel}] ${input}`;
+	async send(input: string, from: Origin = APP) {
+		input = tag(from, input);
+		if (from.channel !== APP.channel) {
 			await this.ctx.storage.put("reply", { ...from, start: this.memory.log.length });
 		}
 		if (this.busy()) return void (await this.root.submit({ type: "input", content: input, whenBusy: "steer" }, C));
@@ -480,7 +408,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	async alarm() {
 		this.memory.pump();
-		if ((await this.#resumeJobs()) || this.memory.pending()) await this.ctx.storage.setAlarm(Date.now() + 30_000);
+		if ((await this.#fx(Effect.flatMap(Jobs, (j) => j.resume()))) || this.memory.pending()) await this.ctx.storage.setAlarm(Date.now() + 30_000);
 	}
 
 	async fetch(req: Request): Promise<Response> {
@@ -504,15 +432,13 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			server.addEventListener("close", () => { clearInterval(tick); this.sockets.delete(server); });
 			return new Response(null, { status: 101, webSocket: client });
 		}
-		if (url.pathname === "/imessage" && req.method === "POST") {
-			const body = await req.text();
-			if (!(await this.#signed(req.headers, body))) return new Response("bad signature", { status: 401 });
-			const { message: m } = JSON.parse(body) as { message: { id: string; space: { id: string }; content: { type: string; text?: string } } };
-			if (m.content.type === "text" && m.content.text && !(await this.ctx.storage.get(`imsg:${m.id}`))) {
-				await this.ctx.storage.put(`imsg:${m.id}`, 1);
-				this.send(m.content.text, { channel: "imessage", to: m.space.id }).catch((e) => console.error("imessage", e));
-			}
-			return new Response("ok");
+		const channel = req.method === "POST" ? this.#channels[url.pathname.slice(1)] : undefined;
+		if (channel) {
+			return this.#fx(channel.receive(req).pipe(
+				Effect.tap((msgs) => Effect.forEach(msgs, (m) => Effect.sync(() => void this.send(m.text, m.from).catch((e) => console.error(channel.name, e))))),
+				Effect.as(new Response("ok")),
+				Effect.catchTag("ChannelError", (e) => Effect.succeed(new Response(e.message, { status: e.status }))),
+			));
 		}
 		if (url.pathname === "/reset" && req.method === "POST") {
 			const keep = await this.ctx.storage.get(["oauth-client", "oauth-tokens", "executor-tools"]);
