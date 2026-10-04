@@ -1,7 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { CAP } from "./prompts.ts";
 
-type Env = { ARTIFACTS: Artifacts };
+type Env = { ARTIFACTS: Artifacts; CF_DEPLOY_TOKEN: string };
+
+const ACCOUNT = "fadf1a80d9469afc81af5899893cd853";
 
 const clip = (s: string) => (s.length <= CAP ? s : `${s.slice(0, CAP / 2)}\n…[${s.length - CAP} chars cut]…\n${s.slice(-CAP / 2)}`);
 
@@ -20,9 +22,10 @@ const SAVE = `git add -A && { git diff --cached --quiet || git commit -qm "$MSG"
 export class Box extends DurableObject<Env> {
 	#ready?: Promise<void>;
 	#note = "";
+	#env: Record<string, string> = {};
 
 	async #run(cmd: string, ms: number, env?: Record<string, string>) {
-		const p = await this.ctx.container!.exec(["bash", "-lc", cmd], { cwd: "/workspace", stderr: "combined", signal: AbortSignal.timeout(ms), env });
+		const p = await this.ctx.container!.exec(["bash", "-lc", cmd], { cwd: "/workspace", stderr: "combined", signal: AbortSignal.timeout(ms), env: { ...this.#env, ...env } });
 		const { stdout, exitCode } = await p.output();
 		return { out: new TextDecoder().decode(stdout), exitCode };
 	}
@@ -38,13 +41,18 @@ export class Box extends DurableObject<Env> {
 		const c = this.ctx.container!;
 		if (c.running && this.#ready) return this.#ready;
 		return (this.#ready = (async () => {
-			const env = { WORKSPACE_REMOTE: await this.#remote("workspace"), RAUBOT_REMOTE: await this.#remote("raubot") };
+			const env = (this.#env = {
+				WORKSPACE_REMOTE: await this.#remote("workspace"),
+				RAUBOT_REMOTE: await this.#remote("raubot"),
+				CLOUDFLARE_API_TOKEN: this.env.CF_DEPLOY_TOKEN,
+				CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+			});
 			if (!c.running) c.start({ image: c.images.box ?? Object.values(c.images)[0], enableInternet: true, env });
 			for (let i = 0; ; i++) {
 				try { await this.#run("true", 10_000); break; } catch (e) { if (i > 60) throw e; await new Promise((r) => setTimeout(r, 1000)); }
 			}
 			await c.setInactivityTimeout(30 * 60_000);
-			const r = await this.#run(SETUP, 300_000, env);
+			const r = await this.#run(SETUP, 300_000);
 			this.#note = r.exitCode ? `[box setup failed]\n${r.out}\n` : "";
 		})().catch((e) => { this.#ready = undefined; throw e; }));
 	}

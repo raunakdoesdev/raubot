@@ -17,7 +17,7 @@ The design follows Victor Taelin's [OptChat](https://gist.github.com/VictorTaeli
 
 ## Source and deploys
 
-The code lives in the Cloudflare Artifacts repo `raubot/raubot` (namespace `raubot`). Workers Builds deploys every push to `main`. The box gets short-lived Artifacts tokens from the `ARTIFACTS` binding, so it needs no GitHub or Cloudflare tokens.
+The code lives in the Cloudflare Artifacts repo `raubot/raubot` (namespace `raubot`). raubot deploys itself from the box: it pushes to `main`, then runs `npx wrangler deploy` with the `CF_DEPLOY_TOKEN` secret (a token that can only deploy Workers). The box gets short-lived Artifacts git tokens from the `ARTIFACTS` binding, so there is no GitHub token.
 
 ## Run
 
