@@ -24,7 +24,7 @@ import { Mcp } from "./mcp.ts";
 import { serve } from "../app/index.ts";
 import type { Core, CoreEvent } from "./api.ts";
 import { agent, type AgentHost } from "./agents.ts";
-import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, send as deliver, tag } from "./channels/index.ts";
+import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, acknowledge, idle, send as deliver, tag } from "./channels/index.ts";
 import * as frozen from "./freezer.ts";
 import { bash, Box, BoxLive, runner, Storage } from "./fx.ts";
 import { JobHost, Jobs, JobsLive } from "./jobs.ts";
@@ -354,7 +354,10 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	async #deliver() {
 		const r = await this.ctx.storage.get<Origin & { start: number }>("reply");
 		const reply = r && !this.busy() && this.memory.log.slice(r.start).filter((m) => m.kind === "talk").at(-1)?.text;
-		if (r && !reply && !this.busy() && this.memory.log.length > r.start + 1) await this.ctx.storage.delete("reply"); // ended silent
+		if (r && !reply && !this.busy() && this.memory.log.length > r.start + 1) { // ended silent
+			await this.ctx.storage.delete("reply");
+			await this.#fx(idle(this.#channels, r));
+		}
 		if (!reply || this.#delivering) return;
 		this.#delivering = true;
 		try {
@@ -474,7 +477,10 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		const channel = req.method === "POST" ? this.#channels[url.pathname.slice(1)] : undefined;
 		if (channel) {
 			return this.#fx(channel.receive(req).pipe(
-				Effect.tap((msgs) => Effect.forEach(msgs, (m) => Effect.sync(() => void this.send(m.text, m.from).catch((e) => console.error(channel.name, e))))),
+				Effect.tap((msgs) => Effect.forEach(msgs, (m) => Effect.sync(() => {
+					this.ctx.waitUntil(this.#fx(acknowledge(channel, m, this.env.AI)));
+					void this.send(m.text, m.from).catch((e) => console.error(channel.name, e));
+				}))),
 				Effect.as(new Response("ok")),
 				Effect.catchTag("ChannelError", (e) => Effect.succeed(new Response(e.message, { status: e.status }))),
 			));

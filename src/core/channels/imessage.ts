@@ -17,7 +17,17 @@ const signed = (secret: string, h: Headers, body: string) => Effect.promise(asyn
 
 const b64 = (s: string) => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
 
-/** iMessage through Photon's Spectrum. Its SDK is gRPC, which Workers can't speak, so the box sends texts. */
+const q = (v: string) => `'${v.replace(/'/g, "'\\''")}'`;
+
+/** Runs imessage/spectrum.mjs (from GitHub main) in the box with these env vars. */
+const spectrum = (space: string, vars: Record<string, string>) => bash(`# imessage ${vars.OP}
+flock /tmp/imessage.lock sh -c 'git -C raubot fetch -q && git -C raubot checkout -q origin/main -- imessage && cd raubot/imessage && { [ -d node_modules ] || npm i -s; }' && cd raubot/imessage && ${Object.entries({ SPACE: space, ...vars }).map(([k, v]) => `${k}=${q(v)}`).join(" ")} node spectrum.mjs`, 120).pipe(
+	Effect.mapError((e) => new ChannelError({ message: e.message, status: 502 })),
+	Effect.filterOrFail((out) => /\[exit 0\]\s*$/.test(out), (out) => new ChannelError({ message: `${vars.OP} failed: ${out.slice(-500)}`, status: 502 })),
+	Effect.asVoid,
+);
+
+/** iMessage through Photon's Spectrum. Its SDK is gRPC, which Workers can't speak, so the box runs its actions. */
 export const imessage = (secret: string): Channel => ({
 	name: "imessage",
 	style: "a text message: keep the reply short, in plain text with no markdown.",
@@ -27,12 +37,10 @@ export const imessage = (secret: string): Channel => ({
 		const { message: m } = yield* Effect.try({ try: () => JSON.parse(body) as Webhook, catch: () => new ChannelError({ message: "bad body", status: 400 }) });
 		if (!m || m.content.type !== "text" || !m.content.text || (yield* kv.get(`imsg:${m.id}`))) return [];
 		yield* kv.put({ [`imsg:${m.id}`]: 1 });
-		return [{ from: { channel: "imessage", to: m.space.id }, text: m.content.text }];
+		return [{ from: { channel: "imessage", to: m.space.id }, id: m.id, text: m.content.text }];
 	}),
-	send: (to, text) => bash(`# imessage reply
-git -C raubot fetch -q && git -C raubot checkout -q origin/main -- imessage && cd raubot/imessage && { [ -d node_modules ] || npm i -s; } && SPACE='${to.replace(/'/g, "")}' TEXT_B64=${b64(text)} node send.mjs`, 120).pipe(
-		Effect.mapError((e) => new ChannelError({ message: e.message, status: 502 })),
-		Effect.filterOrFail((out) => /\[exit 0\]\s*$/.test(out), (out) => new ChannelError({ message: `send failed: ${out.slice(-500)}`, status: 502 })),
-		Effect.asVoid,
-	),
+	send: (to, text) => spectrum(to, { OP: "send", TEXT_B64: b64(text) }),
+	read: (m) => spectrum(m.from.to, { OP: "read", MSG: m.id }),
+	typing: (to, on) => spectrum(to, { OP: "typing", ON: on ? "1" : "0" }),
+	react: (m, emoji) => spectrum(m.from.to, { OP: "react", MSG: m.id, EMOJI: emoji }),
 });
