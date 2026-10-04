@@ -25,7 +25,7 @@ import settings from "./settings.html";
 import tree from "./tree.html";
 import ui from "./ui.html";
 
-type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string };
+type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; SPECTRUM_WEBHOOK_SECRET: string };
 
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
@@ -246,6 +246,27 @@ export class Raubot extends DurableObject<Env> {
 		};
 	}
 
+	/** Spectrum webhook HMAC: hex SHA-256 of `v0:{timestamp}:{body}`, at most 5 minutes old. */
+	async #signed(h: Headers, body: string) {
+		const ts = h.get("x-spectrum-timestamp") ?? "", sig = h.get("x-spectrum-signature") ?? "";
+		if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
+		const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(this.env.SPECTRUM_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+		const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`v0:${ts}:${body}`)));
+		return sig === `v0=${[...mac].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+	}
+
+	/** An inbound iMessage joins the same conversation; the final reply is texted back from the box. */
+	async #imessage(space: string, text: string) {
+		const start = this.memory.log.length;
+		await this.send(`[iMessage] ${text}`);
+		await this.root.waitForIdle(C);
+		await this.#sync();
+		const reply = this.memory.log.slice(start).filter((m) => m.kind === "talk").at(-1)?.text;
+		if (!reply) return;
+		const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(reply)));
+		await this.env.BOX.getByName("main").bash(`# imessage reply\ncd raubot/imessage && { [ -d node_modules ] || npm i -s; } && SPACE='${space.replace(/'/g, "")}' TEXT_B64=${b64} node send.mjs`, 120);
+	}
+
 	busy() { return (this.state.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; }
 
 	async send(input: string) {
@@ -295,6 +316,16 @@ export class Raubot extends DurableObject<Env> {
 			});
 			server.addEventListener("close", () => { clearInterval(tick); this.sockets.delete(server); });
 			return new Response(null, { status: 101, webSocket: client });
+		}
+		if (url.pathname === "/imessage" && req.method === "POST") {
+			const body = await req.text();
+			if (!(await this.#signed(req.headers, body))) return new Response("bad signature", { status: 401 });
+			const { message: m } = JSON.parse(body) as { message: { id: string; space: { id: string }; content: { type: string; text?: string } } };
+			if (m.content.type === "text" && m.content.text && !(await this.ctx.storage.get(`imsg:${m.id}`))) {
+				await this.ctx.storage.put(`imsg:${m.id}`, 1);
+				this.#imessage(m.space.id, m.content.text).catch((e) => console.error("imessage", e));
+			}
+			return new Response("ok");
 		}
 		if (url.pathname === "/reset" && req.method === "POST") {
 			const keep = await this.ctx.storage.get(["oauth-client", "oauth-tokens", "executor-tools"]);

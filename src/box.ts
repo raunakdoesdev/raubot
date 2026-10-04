@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { CAP } from "./prompts.ts";
 
-type Env = { ARTIFACTS: Artifacts; CF_DEPLOY_TOKEN: string };
+type Env = { ARTIFACTS: Artifacts; CF_DEPLOY_TOKEN: string; SPECTRUM_PROJECT_ID: string; SPECTRUM_PROJECT_SECRET: string };
 
 const ACCOUNT = "fadf1a80d9469afc81af5899893cd853";
 
@@ -59,6 +59,8 @@ export class Computer extends DurableObject<Env> {
 				WORKSPACE_REMOTE: await this.#remote("workspace"),
 				RAUBOT_REMOTE: await this.#remote("raubot"),
 				CLOUDFLARE_API_TOKEN: this.env.CF_DEPLOY_TOKEN,
+				SPECTRUM_PROJECT_ID: this.env.SPECTRUM_PROJECT_ID,
+				SPECTRUM_PROJECT_SECRET: this.env.SPECTRUM_PROJECT_SECRET,
 				CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
 			});
 			const image = c.images.box;
