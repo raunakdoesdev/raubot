@@ -1,0 +1,7 @@
+{
+	"compilerOptions": {
+		"target": "es2023", "module": "es2022", "moduleResolution": "bundler", "strict": true, "noEmit": true,
+		"allowImportingTsExtensions": true, "skipLibCheck": true, "lib": ["es2023"], "types": ["@cloudflare/workers-types"]
+	},
+	"include": ["src"]
+}

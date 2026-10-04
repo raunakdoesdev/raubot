@@ -1,0 +1,11 @@
+{
+	"name": "raubot",
+	"main": "src/worker.ts",
+	"compatibility_date": "2026-09-01",
+	"compatibility_flags": ["nodejs_compat"],
+	"workers_dev": false,
+	"routes": [{ "pattern": "raubot.reducto.ai", "custom_domain": true }],
+	"vars": { "MODEL": "gpt-5.4", "COMPACT_MODEL": "gpt-5.4-mini" },
+	"durable_objects": { "bindings": [{ "name": "RAUBOT", "class_name": "Raubot" }] },
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Raubot"] }]
+}
