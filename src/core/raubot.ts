@@ -16,7 +16,7 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
-import { EXECUTOR, MARKS, MASTER, SELF, SUBAGENT, VIEW_DOC } from "./prompts.ts";
+import { EXECUTOR, MARKS, MASTER, SELF, SUBAGENT, VIEW, VIEW_DOC } from "./prompts.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Computer } from "./box.ts";
 import { type App, codemode, describe, type Freezer, type Nested } from "./codemode.ts";
@@ -312,17 +312,36 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	}
 
 	tree(q: URLSearchParams) {
-		const m = this.memory;
-		const part = (l: number, i: number) => ({ l, i, id: i << l, n: 1 << l, text: m.node(l, i) ?? null });
+		const m = this.memory, T = m.log.length;
+		// How the model sees a node: as a view line, folded into a bigger view line, or opened up into finer lines.
+		const seen = (l: number, i: number) => {
+			const a = i << l, b = (i + 1) << l;
+			const hit = m.view.filter(([vl, vi]) => vi << vl < b && (vi + 1) << vl > a);
+			return hit.some(([vl]) => vl === l) ? "view" : hit.some(([vl]) => vl > l) ? "folded" : "open";
+		};
+		const part = (l: number, i: number) => {
+			const a = i << l, b = Math.min((i + 1) << l, T) - 1;
+			return { l, i, id: a, n: 1 << l, text: m.node(l, i) ?? null, from: m.log[a]?.date, to: m.log[b]?.date, kind: l ? undefined : m.log[a]?.kind, seen: seen(l, i) };
+		};
+		if (q.has("find")) {
+			const s = q.get("find")!.toLowerCase(), hits = [];
+			for (let i = T - 1; i >= 0 && hits.length < 50; i--) {
+				const x = m.log[i], k = x.text.toLowerCase().indexOf(s);
+				if (s && k >= 0) hits.push({ id: i, kind: x.kind, date: x.date, snippet: x.text.slice(Math.max(0, k - 60), k + 140) });
+			}
+			return { hits };
+		}
 		if (q.has("l")) {
 			const l = Number(q.get("l")), i = Number(q.get("i"));
-			if (l === 0) { const x = m.log[i]!; return { raw: x.text, kind: x.kind, date: new Date(x.date).toISOString() }; }
-			return { children: [part(l - 1, 2 * i), part(l - 1, 2 * i + 1)] };
+			if (l === 0) { const x = m.log[i]!; return { raw: x.text, kind: x.kind, date: x.date }; }
+			return { children: [part(l - 1, 2 * i), part(l - 1, 2 * i + 1)].filter((c) => c.id < T) };
 		}
-		const rendered = m.render();
+		// The complete subtrees that tile the log, biggest (oldest) first.
+		const roots = [];
+		for (let l = 31, a = 0; l >= 0; l--) if (T & (1 << l)) { roots.push(part(l, a >> l)); a += 1 << l; }
 		return {
-			log: m.log.length, pending: m.pending(), bytes: new TextEncoder().encode(rendered).length,
-			view: m.view.map(([l, i]) => part(l, i)), usage: JSON.parse(m.get("usage") ?? "[]"),
+			log: T, pending: m.pending(), bytes: new TextEncoder().encode(m.render()).length, budget: VIEW,
+			roots, view: m.view.map(([l, i]) => part(l, i)), usage: JSON.parse(m.get("usage") ?? "[]"),
 		};
 	}
 

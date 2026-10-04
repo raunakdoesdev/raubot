@@ -5,42 +5,127 @@
 <title>raubot · memory</title>
 <style>
 *{box-sizing:border-box}
-html{background:#141414;-webkit-text-size-adjust:100%}body{margin:0;background:#141414;font:14px/1.45 ui-sans-serif,system-ui,-apple-system;color:#e8e8e8;padding:0 max(14px,env(safe-area-inset-left)) 40px}
-header{position:sticky;top:0;background:#141414;display:flex;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid #2c2c2c;color:#8b8b8b;flex-wrap:wrap}
-header b{color:#e8e8e8}header a{color:inherit}
-h3{font-size:13px;color:#8b8b8b;font-weight:600;margin:18px 0 6px}
-.n{border-left:2px solid #2c2c2c;padding:4px 0 4px 10px;margin:2px 0;cursor:pointer;overflow-wrap:anywhere}
-.n:hover{border-color:#555}.n.open{border-color:#e8e8e8}
-.k{font:11px ui-monospace,monospace;color:#777;margin-right:6px}
-.kids{margin-left:12px}
-.raw{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;background:#1b1b1b;border-radius:6px;padding:8px;margin:4px 0 4px 12px;overflow-x:auto}
-.pending{color:#d9a441}
-table{border-collapse:collapse;font:12px ui-monospace,monospace;width:100%}
-td,th{padding:3px 6px;text-align:right;border-bottom:1px solid #242424}th{color:#8b8b8b;font-weight:500}
+html{background:#141414;-webkit-text-size-adjust:100%}
+body{margin:0;font:14px/1.45 ui-sans-serif,system-ui,-apple-system;color:#e8e8e8;padding:0 max(14px,env(safe-area-inset-left)) 60px}
+a{color:inherit}
+header{position:sticky;top:0;z-index:2;background:#141414;padding:10px 0 8px;border-bottom:1px solid #2a2a2a}
+.top{display:flex;gap:10px;align-items:center;color:#8b8b8b}.top b{color:#e8e8e8}.top .sp{flex:1}
+.meter{margin:8px 0 4px;height:6px;background:#262626;border-radius:3px;overflow:hidden}.meter i{display:block;height:100%;background:#7aa2f7}
+.sub{font-size:12px;color:#8b8b8b}
+.map{display:flex;height:16px;margin:8px 0 2px;border-radius:3px;overflow:hidden;gap:1px;cursor:pointer}
+.map span{min-width:1px}
+.tabs{display:flex;gap:4px;margin-top:8px}
+.tabs button{background:none;border:0;color:#8b8b8b;font:inherit;padding:4px 10px;border-radius:6px;cursor:pointer}
+.tabs button.on{background:#262626;color:#e8e8e8}
+input{width:100%;background:#1c1c1c;border:1px solid #2c2c2c;border-radius:8px;color:#e8e8e8;font:inherit;padding:7px 10px;margin:10px 0 4px}
+.row{display:grid;grid-template-columns:18px auto 1fr;gap:2px 8px;align-items:baseline;padding:6px 6px;border-radius:6px;cursor:pointer}
+.row:hover{background:#1c1c1c}.row.hl{background:#24304a}
+.tw{color:#666;font-size:11px;width:18px;text-align:center;transition:transform .1s}.open>.tw{transform:rotate(90deg)}
+.lv{font:600 11px ui-monospace,monospace;padding:1px 6px;border-radius:4px;color:#141414;white-space:nowrap}
+.meta{font:11px ui-monospace,monospace;color:#777;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.meta .v{color:#7aa2f7}.meta .f{color:#555}
+.txt{grid-column:3;overflow-wrap:anywhere}.pend{color:#d9a441;font-style:italic}
+.kids{margin-left:14px;border-left:1px solid #2a2a2a;padding-left:4px}
+.raw{white-space:pre-wrap;font:12px/1.45 ui-monospace,monospace;background:#1b1b1b;border-radius:6px;padding:8px 10px;margin:2px 0 6px 26px;overflow-x:auto;max-height:60vh;overflow-y:auto}
+.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:#777;margin:6px 0}.legend b{font-weight:400}
+.hit{padding:6px;border-radius:6px;cursor:pointer}.hit:hover{background:#1c1c1c}.hit .meta{white-space:normal}
+table{border-collapse:collapse;font:12px ui-monospace,monospace;width:100%;margin-top:10px}
+td,th{padding:4px 6px;text-align:right;border-bottom:1px solid #242424}th{color:#8b8b8b;font-weight:500}
 .wrap{overflow-x:auto}
 </style>
-<header><b>memory</b><span id="stats"></span><a href="/">chat</a></header>
-<h3>Cache (last turns' requests)</h3><div class="wrap"><table id="usage"></table></div>
-<h3>View — what the model sees each turn (tap to expand)</h3><div id="view"></div>
+<header>
+	<div class="top"><b>memory</b><span id="stats"></span><span class="sp"></span><a href="/settings">settings</a><a href="/">chat</a></div>
+	<div class="meter" title="view size vs budget"><i id="fill"></i></div>
+	<div class="sub" id="budget"></div>
+	<div class="map" id="map" title="what the model sees, oldest → newest; tap to jump"></div>
+	<div class="tabs"><button data-t="tree" class="on">Tree</button><button data-t="view">Model's view</button><button data-t="cache">Cache</button></div>
+</header>
+<main>
+	<section id="tree">
+		<input id="q" placeholder="Search messages…" autocomplete="off">
+		<div id="hits"></div>
+		<div class="legend"><span><b class="v">● in view</b>: the model sees this line</span><span><b class="f">● folded</b>: seen only inside a bigger summary</span><span>no mark: the model sees finer lines below</span></div>
+		<div id="roots"></div>
+	</section>
+	<section id="view" hidden></section>
+	<section id="cache" hidden><div class="wrap"><table id="usage"></table></div></section>
+</main>
 <script>
-const $=id=>document.getElementById(id);
-const get=q=>fetch("/tree.json"+(q||"")).then(r=>r.json());
-function node(p){
-  const d=document.createElement("div");d.className="n"+(p.text===null?" pending":"");
-  d.innerHTML=`<span class="k">#${p.id}${p.n>1?"+"+p.n:""} L${p.l}</span>`;
-  d.append(p.text??"(summarizing…)");
-  let kids;
-  d.onclick=async e=>{e.stopPropagation();
-    if(kids){kids.remove();kids=null;d.classList.remove("open");return}
-    const r=await get(`?l=${p.l}&i=${p.i}`);kids=document.createElement("div");
-    if(r.raw!==undefined){kids.className="raw";kids.textContent=`[${r.kind} · ${r.date}]\n${r.raw}`}
-    else{kids.className="kids";for(const c of r.children)kids.append(node(c))}
-    d.after(kids);d.classList.add("open")};
-  return d}
-get().then(r=>{
-  $("stats").textContent=`${r.log} messages · ${r.view.length} lines · ${(r.bytes/1000).toFixed(1)} KB · ${r.pending?"summarizing":"settled"}`;
-  for(const p of r.view)$("view").append(node(p));
-  const u=r.usage.slice().reverse();
-  $("usage").innerHTML="<tr><th>time</th><th>input</th><th>cache read</th><th>cache write</th><th>output</th><th>hit</th></tr>"+u.map(x=>{const tot=x.input+x.cacheRead+x.cacheWrite;return`<tr><td>${new Date(x.date).toLocaleTimeString()}</td><td>${x.input}</td><td>${x.cacheRead}</td><td>${x.cacheWrite}</td><td>${x.output}</td><td>${tot?Math.round(100*x.cacheRead/tot):0}%</td></tr>`}).join("");
+const $ = (id) => document.getElementById(id);
+const get = (q = "") => fetch("/tree.json" + q).then((r) => r.json());
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const KIND = { user: "#e0af68", talk: "#9ece6a", tool: "#bb9af7", echo: "#7dcfff", job: "#ff9e64" };
+const hue = (l) => `hsl(${(210 + l * 32) % 360} 55% 62%)`;
+const when = (t) => { const d = new Date(t), now = new Date(); return d.toDateString() === now.toDateString() ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); };
+const span = (p) => p.from == null ? "" : p.n === 1 || p.from === p.to ? when(p.from) : `${when(p.from)} – ${when(p.to)}`;
+const nodes = new Map(); // "l:i" -> row element
+
+function row(p) {
+	const wrap = el("div"), r = el("div", "row");
+	r.append(el("span", "tw", "▸"));
+	const lv = el("span", "lv", p.l ? `L${p.l}` : p.kind); lv.style.background = p.l ? hue(p.l) : KIND[p.kind] || "#888"; r.append(lv);
+	const meta = el("span", "meta", p.l ? `#${p.id}–${p.id + p.n - 1} · ${p.n} msgs · ${span(p)} ` : `#${p.id} · ${span(p)} `);
+	if (p.seen !== "open") meta.append(el("span", p.seen === "view" ? "v" : "f", p.seen === "view" ? "● in view" : "● folded"));
+	r.append(meta, el("span"), el("span", "txt" + (p.text == null ? " pend" : ""), p.text ?? "summarizing…"));
+	wrap.append(r);
+	nodes.set(`${p.l}:${p.i}`, wrap);
+	let kids = null;
+	wrap.toggle = async (open = !kids) => {
+		if (!open) { kids?.remove(); kids = null; r.classList.remove("open"); return; }
+		if (kids) return kids;
+		const c = await get(`?l=${p.l}&i=${p.i}`);
+		if (kids) return kids;
+		if (c.raw !== undefined) kids = el("div", "raw", c.raw);
+		else { kids = el("div", "kids"); for (const k of c.children) kids.append(row(k)); }
+		wrap.append(kids); r.classList.add("open");
+		return kids;
+	};
+	r.onclick = () => wrap.toggle();
+	return wrap;
+}
+
+// Open the path from a root down to node (l, i) and highlight it.
+async function reveal(l, i, top) {
+	tab("tree");
+	const id = i << l, root = top.roots.find((p) => id >= p.id && id < p.id + p.n);
+	if (!root) return;
+	for (let k = root.l; k > l; k--) await nodes.get(`${k}:${id >> k}`)?.toggle(true);
+	const w = nodes.get(`${l}:${i}`); if (!w) return;
+	const r = w.firstChild;
+	r.scrollIntoView({ block: "center", behavior: "smooth" });
+	r.classList.add("hl"); setTimeout(() => r.classList.remove("hl"), 1600);
+}
+
+function tab(t) {
+	for (const b of document.querySelectorAll(".tabs button")) b.classList.toggle("on", b.dataset.t === t);
+	for (const s of ["tree", "view", "cache"]) $(s).hidden = s !== t;
+}
+for (const b of document.querySelectorAll(".tabs button")) b.onclick = () => tab(b.dataset.t);
+
+get().then((top) => {
+	$("stats").textContent = `${top.log} messages · ${top.view.length} lines${top.pending ? " · summarizing…" : ""}`;
+	const pct = Math.min(100, (100 * top.bytes) / top.budget);
+	$("fill").style.width = pct + "%";
+	$("budget").textContent = `view ${(top.bytes / 1000).toFixed(1)} of ${(top.budget / 1000).toFixed(0)} KB · ` +
+		(top.view.every((p) => p.l === 0) ? "all raw messages; summaries replace the oldest once it's full" : `oldest messages folded into L${Math.max(...top.view.map((p) => p.l))} summaries`);
+	for (const p of top.view) {
+		const s = el("span"); s.style.flex = Math.min(p.n, top.log - p.id); s.style.background = p.l ? hue(p.l) : "#3a3a3a";
+		s.title = `L${p.l} #${p.id}+${p.n}`; s.onclick = () => reveal(p.l, p.i, top); $("map").append(s);
+	}
+	for (const p of top.roots) $("roots").append(row(p));
+	for (const p of top.view) $("view").append(row(p));
+	const u = top.usage.slice().reverse();
+	$("usage").innerHTML = "<tr><th>time</th><th>input</th><th>cache read</th><th>cache write</th><th>output</th><th>hit</th></tr>" + u.map((x) => { const tot = x.input + x.cacheRead + x.cacheWrite; return `<tr><td>${new Date(x.date).toLocaleTimeString()}</td><td>${x.input}</td><td>${x.cacheRead}</td><td>${x.cacheWrite}</td><td>${x.output}</td><td>${tot ? Math.round((100 * x.cacheRead) / tot) : 0}%</td></tr>`; }).join("");
+	let t;
+	$("q").oninput = () => { clearTimeout(t); t = setTimeout(async () => {
+		$("hits").replaceChildren();
+		const s = $("q").value.trim(); if (!s) return;
+		const { hits } = await get(`?find=${encodeURIComponent(s)}`);
+		if (!hits.length) $("hits").append(el("div", "sub", "no matches"));
+		for (const h of hits) {
+			const d = el("div", "hit"), m = el("div", "meta"); const k = el("span", "lv", h.kind); k.style.background = KIND[h.kind]; m.append(k, ` #${h.id} · ${when(h.date)}`);
+			d.append(m, el("div", "sub", h.snippet)); d.onclick = () => { $("hits").replaceChildren(); reveal(0, h.id, top); }; $("hits").append(d);
+		}
+	}, 200); };
 });
 </script>
