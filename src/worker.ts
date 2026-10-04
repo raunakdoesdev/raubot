@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT as C } from "@earendil-works/chord/context";
 import type { AttachedReplicatedState } from "@earendil-works/chord";
 import { createModels } from "@earendil-works/pi-ai/models";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import type { Message } from "@earendil-works/pi-ai";
 import {
@@ -12,14 +13,39 @@ import type { EntryId } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
-import { MASTER, VIEW_DOC } from "./prompts.ts";
+import { MARKS, MASTER, VIEW_DOC } from "./prompts.ts";
 import { DoSqlite } from "./sql.ts";
 import ui from "./ui.html";
 
-type Env = { RAUBOT: DurableObjectNamespace<Raubot>; OPENAI_API_KEY: string; MODEL: string; COMPACT_MODEL: string };
+type Env = { RAUBOT: DurableObjectNamespace<Raubot>; OPENAI_API_KEY: string; ANTHROPIC_API_KEY: string; PROVIDER: string; MODEL: string; COMPACT_MODEL: string };
 
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
+
+/** Cut the view at the last line end before each mark; every piece but the tail ends on a cache breakpoint. */
+export const pieces = (view: string) => {
+	const out: string[] = [];
+	let at = 0;
+	for (const mark of MARKS) {
+		if (mark >= view.length) break;
+		const cut = view.lastIndexOf("\n", mark) + 1;
+		if (cut > at) out.push(view.slice(at, (at = cut)));
+	}
+	return { out: [...out, view.slice(at)], marks: out.length };
+};
+
+type Block = { cache_control?: unknown };
+type AnthropicPayload = { system?: Block[] | string; tools?: Block[]; messages?: { role: string; content: Block[] | string }[] };
+
+/** Anthropic allows 4 breakpoints: the view's marks plus pi's request-end mark. System and tools sit inside the first view mark's prefix. */
+const markView = (marks: number) => (payload: unknown) => {
+	const p = payload as AnthropicPayload;
+	const first = p.messages?.find((m) => m.role === "user");
+	if (!marks || !first || typeof first.content === "string") return undefined;
+	for (const b of [...(Array.isArray(p.system) ? p.system : []), ...(p.tools ?? [])]) delete b.cache_control;
+	for (const b of first.content.slice(0, marks)) b.cache_control = { type: "ephemeral" };
+	return p;
+};
 
 export class Raubot extends DurableObject<Env> {
 	memory!: Memory;
@@ -29,6 +55,7 @@ export class Raubot extends DurableObject<Env> {
 	sockets = new Set<WebSocket>();
 	#lock: Promise<unknown> = Promise.resolve();
 	#partial = "";
+	#marks = 0;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -38,6 +65,10 @@ export class Raubot extends DurableObject<Env> {
 	async #init() {
 		const models = createModels({ authContext: { env: async (n) => (this.env as unknown as Record<string, string>)[n], fileExists: async () => false } });
 		models.setProvider(openaiProvider());
+		models.setProvider(anthropicProvider());
+		const stream = models.streamSimple.bind(models);
+		models.streamSimple = (model, context, options) =>
+			stream(model, context, model.api === "anthropic-messages" ? { ...options, onPayload: markView(this.#marks) } : options);
 		const compactor = models.getModel("openai", this.env.COMPACT_MODEL)!;
 		this.memory = new Memory(this.ctx.storage.sql, async (systemPrompt, prompt) => {
 			const r = await models.completeSimple(compactor, { systemPrompt, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, { reasoning: "low" });
@@ -71,8 +102,9 @@ export class Raubot extends DurableObject<Env> {
 					if (at < 0) return undefined;
 					const first = messages[at] as Extract<Message, { role: "user" }>;
 					const body = typeof first.content === "string" ? [{ type: "text" as const, text: first.content }] : first.content;
-					const view = { type: "text" as const, text: `<view>\n${memory.get("pinned") ?? ""}\n</view>\n\nNew message:\n` };
-					return { messages: messages.with(at, { ...first, content: [view, ...body] }) };
+					const { out, marks } = pieces(`<view>\n${memory.get("pinned") ?? ""}\n</view>\n\nNew message:\n`);
+					this.#marks = marks;
+					return { messages: messages.with(at, { ...first, content: [...out.map((text) => ({ type: "text" as const, text })), ...body] }) };
 				},
 			})],
 		}));
@@ -80,7 +112,7 @@ export class Raubot extends DurableObject<Env> {
 		const storage = await SqliteStorage.open(new DoSqlite(this.ctx.storage));
 		this.harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false } } }, C);
 		this.root = await this.harness.root(C, {
-			agent: { model: { provider: "openai", modelId: this.env.MODEL }, thinkingLevel: "medium" },
+			agent: { model: { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium" },
 		});
 		this.state = await this.root.viewState(C);
 		this.state.subscribe(async (view) => {

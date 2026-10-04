@@ -1,5 +1,7 @@
 export const NODE = 512;
 export const VIEW = 128_000;
+/** Cache breakpoints inside the view, in characters. */
+export const MARKS = [50_000, 80_000, 100_000];
 export const JOBS = 8;
 export const TRIES = 5;
 export const RETRY = 10_000;

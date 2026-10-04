@@ -152,14 +152,12 @@ export class Memory {
 			if (bytes(a) + 1 + bytes(b) <= NODE) return `${a} ${b}`;
 			target = `${a}\n${b}`;
 		}
-		const context = this.view
-			.filter(([m, j]) => ((j + 1) << m) <= start && this.node(m, j) !== undefined)
-			.map(([m, j]) => this.node(m, j))
-			.join("\n");
+		// The whole current view, bare: the same prefix for every compactor call, so it caches.
+		const context = this.view.map(([m, j]) => this.node(m, j)).filter((t) => t !== undefined).join("\n");
 		let best: string | undefined, feedback = "";
 		for (let t = 0; t < TRIES; t++) {
 			const out = oneLine(await this.llm(COMPACT_PROMPT,
-				`CONTEXT:\n${context || "(start of conversation)"}\n\nTARGET:\n${target}\n\nWrite one summary line of the TARGET, at most ${NODE} bytes.${feedback}`));
+				`<chat>\n${context || "(start of conversation)"}\n</chat>\n\nTARGET:\n${target}\n\nWrite one summary line of the TARGET, at most ${NODE} bytes.${feedback}`));
 			if (!out) continue;
 			if (!best || bytes(out) < bytes(best)) best = out;
 			if (bytes(out) <= NODE) return out;
