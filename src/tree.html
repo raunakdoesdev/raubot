@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>raubot · memory</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.45 ui-sans-serif,system-ui,-apple-system;color:#111;padding:0 max(14px,env(safe-area-inset-left)) 40px}
+header{position:sticky;top:0;background:#fff;display:flex;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid #eee;color:#888;flex-wrap:wrap}
+header b{color:#111}header a{color:inherit}
+h3{font-size:13px;color:#888;font-weight:600;margin:18px 0 6px}
+.n{border-left:2px solid #eee;padding:4px 0 4px 10px;margin:2px 0;cursor:pointer;overflow-wrap:anywhere}
+.n:hover{border-color:#bbb}.n.open{border-color:#111}
+.k{font:11px ui-monospace,monospace;color:#999;margin-right:6px}
+.kids{margin-left:12px}
+.raw{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;background:#f6f6f6;border-radius:6px;padding:8px;margin:4px 0 4px 12px;overflow-x:auto}
+.pending{color:#b70}
+table{border-collapse:collapse;font:12px ui-monospace,monospace;width:100%}
+td,th{padding:3px 6px;text-align:right;border-bottom:1px solid #f0f0f0}th{color:#888;font-weight:500}
+.wrap{overflow-x:auto}
+</style>
+<header><b>memory</b><span id="stats"></span><a href="/">chat</a></header>
+<h3>Cache (last turns' requests)</h3><div class="wrap"><table id="usage"></table></div>
+<h3>View — what the model sees each turn (tap to expand)</h3><div id="view"></div>
+<script>
+const $=id=>document.getElementById(id);
+const get=q=>fetch("/tree.json"+(q||"")).then(r=>r.json());
+function node(p){
+  const d=document.createElement("div");d.className="n"+(p.text===null?" pending":"");
+  d.innerHTML=`<span class="k">#${p.id}${p.n>1?"+"+p.n:""} L${p.l}</span>`;
+  d.append(p.text??"(summarizing…)");
+  let kids;
+  d.onclick=async e=>{e.stopPropagation();
+    if(kids){kids.remove();kids=null;d.classList.remove("open");return}
+    const r=await get(`?l=${p.l}&i=${p.i}`);kids=document.createElement("div");
+    if(r.raw!==undefined){kids.className="raw";kids.textContent=`[${r.kind} · ${r.date}]\n${r.raw}`}
+    else{kids.className="kids";for(const c of r.children)kids.append(node(c))}
+    d.after(kids);d.classList.add("open")};
+  return d}
+get().then(r=>{
+  $("stats").textContent=`${r.log} messages · ${r.view.length} lines · ${(r.bytes/1000).toFixed(1)} KB · ${r.pending} pending`;
+  for(const p of r.view)$("view").append(node(p));
+  const u=r.usage.slice().reverse();
+  $("usage").innerHTML="<tr><th>time</th><th>input</th><th>cache read</th><th>cache write</th><th>output</th><th>hit</th></tr>"+u.map(x=>{const tot=x.input+x.cacheRead+x.cacheWrite;return`<tr><td>${new Date(x.date).toLocaleTimeString()}</td><td>${x.input}</td><td>${x.cacheRead}</td><td>${x.cacheWrite}</td><td>${x.output}</td><td>${tot?Math.round(100*x.cacheRead/tot):0}%</td></tr>`}).join("");
+});
+</script>

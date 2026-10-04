@@ -4,6 +4,7 @@ import type { AttachedReplicatedState } from "@earendil-works/chord";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import type { Message } from "@earendil-works/pi-ai";
 import {
 	type Conversation, type ConversationView, createRegistry, defineExtension, defineTool, GenerationTask, Harness,
@@ -15,9 +16,10 @@ import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
 import { MARKS, MASTER, VIEW_DOC } from "./prompts.ts";
 import { DoSqlite } from "./sql.ts";
+import tree from "./tree.html";
 import ui from "./ui.html";
 
-type Env = { RAUBOT: DurableObjectNamespace<Raubot>; OPENAI_API_KEY: string; ANTHROPIC_API_KEY: string; PROVIDER: string; MODEL: string; COMPACT_MODEL: string };
+type Env = { RAUBOT: DurableObjectNamespace<Raubot>; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; MODEL: string; COMPACT_MODEL: string };
 
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
@@ -66,6 +68,7 @@ export class Raubot extends DurableObject<Env> {
 		const models = createModels({ authContext: { env: async (n) => (this.env as unknown as Record<string, string>)[n], fileExists: async () => false } });
 		models.setProvider(openaiProvider());
 		models.setProvider(anthropicProvider());
+		models.setProvider(openrouterProvider());
 		const stream = models.streamSimple.bind(models);
 		models.streamSimple = (model, context, options) =>
 			stream(model, context, model.api === "anthropic-messages" ? { ...options, onPayload: markView(this.#marks) } : options);
@@ -148,6 +151,7 @@ export class Raubot extends DurableObject<Env> {
 			for (const e of fresh.filter((e) => e.id !== last).reverse()) {
 				for (const m of e.model ?? []) {
 					const date = m.timestamp ?? Date.now();
+					if (m.role === "assistant" && m.usage) this.#usage({ date, ...m.usage });
 					if (m.role === "user") this.#log("user", text(m.content), date);
 					else if (m.role === "toolResult") this.#log("echo", `${m.toolName}: ${text(m.content)}`, date);
 					else for (const b of m.content) {
@@ -163,6 +167,28 @@ export class Raubot extends DurableObject<Env> {
 
 	#log(kind: Msg["kind"], body: string, date: number) {
 		if (body.trim()) this.memory.append(kind, body, date);
+	}
+
+	#usage(u: { date: number; input: number; output: number; cacheRead: number; cacheWrite: number }) {
+		console.log("usage", JSON.stringify(u));
+		const all = JSON.parse(this.memory.get("usage") ?? "[]") as object[];
+		const { date, input, output, cacheRead, cacheWrite } = u;
+		this.memory.set("usage", JSON.stringify([...all, { date, input, output, cacheRead, cacheWrite }].slice(-50)));
+	}
+
+	#tree(q: URLSearchParams) {
+		const m = this.memory;
+		const part = (l: number, i: number) => ({ l, i, id: i << l, n: 1 << l, text: m.node(l, i) ?? null });
+		if (q.has("l")) {
+			const l = Number(q.get("l")), i = Number(q.get("i"));
+			if (l === 0) { const x = m.log[i]!; return { raw: x.text, kind: x.kind, date: new Date(x.date).toISOString() }; }
+			return { children: [part(l - 1, 2 * i), part(l - 1, 2 * i + 1)] };
+		}
+		const rendered = m.render();
+		return {
+			log: m.log.length, pending: m.pending(), bytes: new TextEncoder().encode(rendered).length,
+			view: m.view.map(([l, i]) => part(l, i)), usage: JSON.parse(m.get("usage") ?? "[]"),
+		};
 	}
 
 	busy() { return (this.state.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; }
@@ -215,15 +241,8 @@ export class Raubot extends DurableObject<Env> {
 			server.addEventListener("close", () => { clearInterval(tick); this.sockets.delete(server); });
 			return new Response(null, { status: 101, webSocket: client });
 		}
-		if (url.pathname === "/tree") {
-			const lines = [`# view (${this.memory.view.length} lines, ${this.memory.log.length} messages)`, this.memory.render(), ""];
-			for (let l = 0; 1 << l <= this.memory.log.length; l++) {
-				lines.push(`# level ${l}`);
-				for (let i = 0; (i + 1) << l <= this.memory.log.length; i++) lines.push(`${i << l}+${1 << l}|${this.memory.node(l, i) ?? "-"}`);
-				lines.push("");
-			}
-			return new Response(lines.join("\n"), { headers: { "content-type": "text/plain; charset=utf-8" } });
-		}
+		if (url.pathname === "/tree") return new Response(tree, { headers: { "content-type": "text/html; charset=utf-8" } });
+		if (url.pathname === "/tree.json") return Response.json(this.#tree(url.searchParams));
 		return new Response("not found", { status: 404 });
 	}
 }
