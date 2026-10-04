@@ -1,21 +1,22 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="color-scheme" content="dark"><meta name="theme-color" content="#141414">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>raubot · memory</title>
 <style>
 *{box-sizing:border-box}
-body{margin:0;font:14px/1.45 ui-sans-serif,system-ui,-apple-system;color:#111;padding:0 max(14px,env(safe-area-inset-left)) 40px}
-header{position:sticky;top:0;background:#fff;display:flex;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid #eee;color:#888;flex-wrap:wrap}
-header b{color:#111}header a{color:inherit}
-h3{font-size:13px;color:#888;font-weight:600;margin:18px 0 6px}
-.n{border-left:2px solid #eee;padding:4px 0 4px 10px;margin:2px 0;cursor:pointer;overflow-wrap:anywhere}
-.n:hover{border-color:#bbb}.n.open{border-color:#111}
-.k{font:11px ui-monospace,monospace;color:#999;margin-right:6px}
+html{background:#141414;-webkit-text-size-adjust:100%}body{margin:0;background:#141414;font:14px/1.45 ui-sans-serif,system-ui,-apple-system;color:#e8e8e8;padding:0 max(14px,env(safe-area-inset-left)) 40px}
+header{position:sticky;top:0;background:#141414;display:flex;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid #2c2c2c;color:#8b8b8b;flex-wrap:wrap}
+header b{color:#e8e8e8}header a{color:inherit}
+h3{font-size:13px;color:#8b8b8b;font-weight:600;margin:18px 0 6px}
+.n{border-left:2px solid #2c2c2c;padding:4px 0 4px 10px;margin:2px 0;cursor:pointer;overflow-wrap:anywhere}
+.n:hover{border-color:#555}.n.open{border-color:#e8e8e8}
+.k{font:11px ui-monospace,monospace;color:#777;margin-right:6px}
 .kids{margin-left:12px}
-.raw{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;background:#f6f6f6;border-radius:6px;padding:8px;margin:4px 0 4px 12px;overflow-x:auto}
-.pending{color:#b70}
+.raw{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;background:#1b1b1b;border-radius:6px;padding:8px;margin:4px 0 4px 12px;overflow-x:auto}
+.pending{color:#d9a441}
 table{border-collapse:collapse;font:12px ui-monospace,monospace;width:100%}
-td,th{padding:3px 6px;text-align:right;border-bottom:1px solid #f0f0f0}th{color:#888;font-weight:500}
+td,th{padding:3px 6px;text-align:right;border-bottom:1px solid #242424}th{color:#8b8b8b;font-weight:500}
 .wrap{overflow-x:auto}
 </style>
 <header><b>memory</b><span id="stats"></span><a href="/">chat</a></header>
