@@ -122,6 +122,15 @@ export class Computer extends DurableObject<Env> {
 		return this.status();
 	}
 
+	/** Stop the box and forget its snapshot; the next call starts fresh from git. */
+	async reset() {
+		const c = this.ctx.container!;
+		if (c.running) await c.destroy("reset");
+		this.#ready = undefined;
+		await this.ctx.storage.deleteAlarm();
+		await this.ctx.storage.deleteAll();
+	}
+
 	async status() {
 		const [snapshot, last, saved, alarm] = await Promise.all(["snapshot", "last", "saved"].map((k) => this.ctx.storage.get(k)).concat(this.ctx.storage.getAlarm()));
 		return { running: this.ctx.container!.running, images: this.ctx.container!.images, snapshot, last, saved, alarm };

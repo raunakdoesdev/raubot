@@ -3,13 +3,20 @@
 <style>
 html{background:#141414;-webkit-text-size-adjust:100%}body{margin:0;background:#141414;font:15px/1.5 -apple-system,system-ui,sans-serif;color:#e8e8e8;padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) 16px max(16px,env(safe-area-inset-left));max-width:560px}
 a{color:inherit}h1{font-size:15px;margin:0 0 20px}.row{display:flex;align-items:center;gap:12px;padding:14px 0;border-top:1px solid #2c2c2c}
-.row span{flex:1}small{color:#8b8b8b;display:block}.btn{padding:8px 14px;border:1px solid #3a3a3a;border-radius:18px;text-decoration:none}
+.row span{flex:1}small{color:#8b8b8b;display:block}.danger{color:#ff6b6b;border-color:#5a2a2a;background:none;font:inherit;cursor:pointer}.btn{padding:8px 14px;border:1px solid #3a3a3a;border-radius:18px;text-decoration:none}
 </style></head><body>
 <h1><a href="/">raubot</a> · settings</h1>
 <div class="row"><span>Executor<small id="ex">…</small></span><a class="btn" id="exb" href="/oauth/start">Connect</a></div>
 <div class="row"><span>Memory tree<small>what the model sees, and cache stats</small></span><a class="btn" href="/tree">Open</a></div>
 <div class="row"><span>Prompt<small>system prompt and codemode tool description</small></span><a class="btn" href="/prompt">Open</a></div>
+<div class="row"><span>Clear history<small>delete the whole conversation, memory tree and box snapshot</small></span><button class="btn danger" id="reset">Clear</button></div>
 <script>
+reset.onclick=async()=>{
+	if(prompt('This permanently deletes the entire conversation, memory tree and box snapshot. Type CLEAR to confirm.')!=="CLEAR")return;
+	reset.disabled=true;reset.textContent="Clearing…";
+	const r=await fetch("/reset",{method:"POST"});
+	if(r.ok)location.href="/";else{alert(await r.text());reset.disabled=false;reset.textContent="Clear";}
+};
 fetch("/settings.json").then(r=>r.json()).then(s=>{
 	ex.textContent=s.executor?`connected · ${s.tools} tools`:"not connected";
 	if(s.executor)exb.textContent="Reconnect";

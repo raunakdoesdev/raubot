@@ -296,6 +296,15 @@ export class Raubot extends DurableObject<Env> {
 			server.addEventListener("close", () => { clearInterval(tick); this.sockets.delete(server); });
 			return new Response(null, { status: 101, webSocket: client });
 		}
+		if (url.pathname === "/reset" && req.method === "POST") {
+			const keep = await this.ctx.storage.get(["oauth-client", "oauth-tokens", "executor-tools"]);
+			await this.env.BOX.getByName("main").reset();
+			await this.ctx.storage.deleteAlarm();
+			await this.ctx.storage.deleteAll();
+			await this.ctx.storage.put(Object.fromEntries(keep));
+			setTimeout(() => this.ctx.abort("history cleared"), 100);
+			return new Response("cleared");
+		}
 		if (url.pathname === "/settings") return new Response(settings, { headers: { "content-type": "text/html; charset=utf-8" } });
 		if (url.pathname === "/settings.json") {
 			const tools = await this.ctx.storage.get<unknown[]>("executor-tools");
