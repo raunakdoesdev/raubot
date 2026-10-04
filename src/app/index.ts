@@ -62,6 +62,7 @@ export const serve = async (core: Core, req: Request): Promise<Response> => {
 			const a = await core.ask(token);
 			return a ? Response.json({ name: a.name, why: a.why }) : new Response("expired", { status: 404 });
 		}
+		if (req.method === "DELETE") { await core.dismiss(token); return new Response("dismissed"); }
 		if (req.method === "POST") {
 			const { value, ttl } = (await req.json()) as { value?: string; ttl?: number };
 			try { await core.answer(token, String(value ?? ""), TTLS.some(([, s]) => s === ttl) ? ttl : undefined); }

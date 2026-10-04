@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Check, KeyRound } from "@lucide/svelte";
+	import { Check, KeyRound, X } from "@lucide/svelte";
 	import { Button } from "$lib/components/ui/button";
 	import * as Card from "$lib/components/ui/card";
 	import { Input } from "$lib/components/ui/input";
@@ -7,7 +7,7 @@
 	import { TTLS } from "../../../src/app/ttl.ts";
 
 	let { token, name, why }: { token: string; name: string; why: string } = $props();
-	let value = $state(""), ttl = $state("0"), saving = $state(false), saved = $state(false), error = $state("");
+	let value = $state(""), ttl = $state("0"), saving = $state(false), saved = $state(false), dismissed = $state(false), error = $state("");
 	const label = $derived(TTLS.find(([, s]) => String(s) === ttl)?.[0]);
 
 	async function save(e: SubmitEvent) {
@@ -17,17 +17,26 @@
 		saving = false; value = "";
 		if (r.ok) saved = true; else error = await r.text();
 	}
+	async function dismiss() {
+		const r = await fetch(`/s/${token}`, { method: "DELETE" });
+		if (r.ok) dismissed = true; else error = await r.text();
+	}
 </script>
 
 <Card.Root class="gap-4 border-warn/25 py-5">
-	<Card.Header class="px-5">
+	<Card.Header class="relative px-5 pr-12">
+		{#if !saved && !dismissed}
+			<Button variant="ghost" size="icon-sm" class="absolute -top-1 right-3 text-muted-foreground" aria-label="dismiss" title="Dismiss" onclick={dismiss}><X /></Button>
+		{/if}
 		<Card.Title class="flex items-center gap-2 text-[15px]">
 			<KeyRound class="size-4 text-warn" />raubot needs <code class="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[13px]">{name}</code>
 		</Card.Title>
 		<Card.Description>{why}</Card.Description>
 	</Card.Header>
 	<Card.Content class="px-5">
-		{#if saved}
+		{#if dismissed}
+			<p class="text-sm text-muted-foreground">Dismissed.</p>
+		{:else if saved}
 			<p class="flex items-center gap-2 text-sm text-emerald-400"><Check class="size-4" />Saved. raubot can use it now.</p>
 		{:else}
 			<form onsubmit={save} class="flex flex-col gap-3">

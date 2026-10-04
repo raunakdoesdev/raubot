@@ -475,6 +475,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		await this.send(`[secret ${a.name} saved] The user set ${a.name}${ttl ? `, expiring in ${Math.round(ttl / 3600)}h` : ""}. It's in your bash env now.`, a.from);
 	}
 
+	async dismiss(token: string) {
+		await this.#fx(Effect.flatMap(Secrets, (s) => s.dismiss(token)));
+		await this.#asks();
+	}
+
 	secrets() { return this.#fx(Effect.flatMap(Secrets, (s) => s.list())); }
 
 	removeSecret(name: string) { return this.#fx(Effect.flatMap(Secrets, (s) => s.remove([name]))); }

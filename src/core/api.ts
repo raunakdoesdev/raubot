@@ -25,6 +25,8 @@ export interface Core {
 	ask(token: string): Promise<SecretAsk | undefined>;
 	/** Answer an ask; `ttl` in seconds, none keeps it until removed. */
 	answer(token: string, value: string, ttl?: number): Promise<void>;
+	/** Drop an ask without answering it; raubot isn't told. */
+	dismiss(token: string): Promise<void>;
 	secrets(): Promise<Secret[]>;
 	removeSecret(name: string): Promise<void>;
 	/** Wipe the conversation, jobs and box snapshot (keeps app connections). */

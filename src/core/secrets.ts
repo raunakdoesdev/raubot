@@ -18,6 +18,8 @@ export class Secrets extends Context.Tag("Secrets")<Secrets, {
 	find(token: string): Effect.Effect<Ask, SecretError>;
 	/** Answers an ask; `ttl` in seconds, none means kept until removed. */
 	answer(token: string, value: string, ttl?: number): Effect.Effect<Ask, SecretError>;
+	/** Drops an ask unanswered. */
+	dismiss(token: string): Effect.Effect<void>;
 	list(): Effect.Effect<Secret[]>;
 	remove(names: string[]): Effect.Effect<void>;
 	/** Every live secret by name, for the box's env. */
@@ -67,6 +69,7 @@ export const SecretsLive = (rawKey: string) => Layer.effect(Secrets, Effect.gen(
 			yield* run(kv.delete([`ask:${token}`]));
 			return a;
 		}),
+		dismiss: (token) => Effect.asVoid(run(kv.delete([`ask:${token}`]))),
 		list: () => Effect.map(live, (all) => all.map(({ iv: _, data: __, ...s }) => s)),
 		remove: (names) => Effect.asVoid(run(kv.delete(names.map((n) => `secret:${n}`)))),
 		env: () => Effect.flatMap(live, (all) => Effect.forEach(all, (s) => Effect.tryPromise(() =>
