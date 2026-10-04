@@ -1,26 +1,38 @@
 // The web app: a client of the core. It serves the pages and turns HTTP/WebSocket calls into `Core` calls.
 import type { Core } from "../core/api.ts";
 import type { Computer } from "../core/box.ts";
-import settings from "./settings.html";
 import tree from "./tree.html";
-import ui from "./ui.html";
 import og from "./og.png";
-import secret from "./secret.html";
-
-/** Expiry choices for a secret, in seconds; 0 keeps it. */
-export const TTLS = [["Keep until removed", 0], ["1 hour", 3600], ["1 day", 86_400], ["7 days", 604_800], ["30 days", 2_592_000]] as const;
-const ttlOptions = TTLS.map(([l, s]) => `<option value="${s}">${l}</option>`).join("");
-const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-const FORM = `<input name="value" type="password" placeholder="Paste the secret" autocomplete="off" autofocus required><div class="row"><select name="ttl">${ttlOptions}</select><button>Save</button></div><div class="note">Encrypted at rest. raubot can use it but never sees it.</div>`;
+import { TTLS } from "./ttl.ts";
 
 const html = (s: string) => new Response(s, { headers: { "content-type": "text/html; charset=utf-8" } });
+const TOKEN = /^\/s\/([\w-]{32})(\.json)?$/;
 
-/** Routes that need no core: the chat page and the box status. */
-export const edge = async (req: Request, box: DurableObjectNamespace<Computer>) => {
-	const { pathname } = new URL(req.url);
-	if (pathname === "/") return html(ui.replace("<!--TTLS-->", ttlOptions));
+export type EdgeEnv = { BOX: DurableObjectNamespace<Computer>; ASSETS: Fetcher };
+
+/** Routes that need no core: the built pages (web/), the box status, and a secret link's page with its preview tags. */
+export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Promise<Response>) => {
+	const url = new URL(req.url), { pathname } = url;
+	const asset = (p: string) => env.ASSETS.fetch(new URL(p, url));
+	if (pathname === "/" || pathname === "/settings" || pathname.startsWith("/assets/")) return asset(pathname);
+	// Secret links skip Access, so their page loads its assets relative to /s/.
+	if (pathname.startsWith("/s/assets/")) return asset(pathname.slice(2));
 	if (pathname === "/s/og.png") return new Response(og, { headers: { "content-type": "image/png", "cache-control": "public, max-age=86400" } });
+	const token = TOKEN.exec(pathname);
+	if (token && !token[2] && req.method === "GET") {
+		const r = await core(new Request(new URL(`/s/${token[1]}.json`, url)));
+		const a = r.ok ? ((await r.json()) as { name: string; why: string }) : undefined;
+		const title = a ? `raubot needs ${a.name}` : "This link has expired", desc = a?.why ?? "Ask raubot for a new one.";
+		const set = (v: string) => ({ element: (e: Element) => void e.setAttribute("content", v) });
+		return new HTMLRewriter()
+			.on("title", { element: (e) => void e.setInnerContent(title) })
+			.on('meta[property="og:title"]', set(title))
+			.on('meta[property="og:description"]', set(desc))
+			.on('meta[property="og:image"]', set(`${url.origin}/s/og.png`))
+			.transform(await asset("/secret"));
+	}
 	if (pathname === "/box") {
+		const box = env.BOX;
 		const b = box.getByName("main");
 		return Response.json(req.method === "POST" ? await b.stop() : await b.status());
 	}
@@ -46,21 +58,21 @@ const socket = (core: Core) => {
 export const serve = async (core: Core, req: Request): Promise<Response> => {
 	const url = new URL(req.url);
 	// Secret form links: outside Cloudflare Access (so iMessage can preview them); the token is the only key.
-	const token = /^\/s\/([\w-]{32})$/.exec(url.pathname)?.[1];
+	const [, token, json] = TOKEN.exec(url.pathname) ?? [];
 	if (token) {
+		if (json) {
+			const a = await core.ask(token);
+			return a ? Response.json({ name: a.name, why: a.why }) : new Response("expired", { status: 404 });
+		}
 		if (req.method === "POST") {
 			const { value, ttl } = (await req.json()) as { value?: string; ttl?: number };
 			try { await core.answer(token, String(value ?? ""), TTLS.some(([, s]) => s === ttl) ? ttl : undefined); }
 			catch (e) { return new Response(e instanceof Error ? e.message : String(e), { status: 400 }); }
 			return new Response("saved");
 		}
-		const a = await core.ask(token);
-		const fill = (name: string, why: string, body: string) => html(secret.replace(/\{\{(\w+)\}\}/g, (_, k) => ({ name: esc(name), why: esc(why), origin: url.origin, body })[k as "name"] ?? ""));
-		return a ? fill(a.name, a.why, FORM) : fill("nothing", "This link has expired or was already used.", "");
 	}
 	switch (url.pathname) {
 		case "/ws": return socket(core);
-		case "/settings": return html(settings);
 		case "/settings.json": return Response.json(await core.settings());
 		case "/tree": return html(tree);
 		case "/tree.json": return Response.json(core.tree(url.searchParams));
