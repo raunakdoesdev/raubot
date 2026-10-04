@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>raubot · settings</title>
+<style>
+body{margin:0;font:15px/1.5 -apple-system,system-ui,sans-serif;color:#111;padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) 16px max(16px,env(safe-area-inset-left));max-width:560px}
+a{color:inherit}h1{font-size:15px;margin:0 0 20px}.row{display:flex;align-items:center;gap:12px;padding:14px 0;border-top:1px solid #eee}
+.row span{flex:1}small{color:#888;display:block}.btn{padding:8px 14px;border:1px solid #ddd;border-radius:18px;text-decoration:none}
+</style></head><body>
+<h1><a href="/">raubot</a> · settings</h1>
+<div class="row"><span>Executor<small id="ex">…</small></span><a class="btn" id="exb" href="/oauth/start">Connect</a></div>
+<div class="row"><span>Memory tree<small>what the model sees, and cache stats</small></span><a class="btn" href="/tree">Open</a></div>
+<script>
+fetch("/settings.json").then(r=>r.json()).then(s=>{
+	ex.textContent=s.executor?`connected · ${s.tools} tools`:"not connected";
+	if(s.executor)exb.textContent="Reconnect";
+});
+</script></body></html>

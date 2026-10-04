@@ -7,17 +7,18 @@ export class Mcp {
 	#id = 0;
 	#ready?: Promise<void>;
 
-	constructor(readonly url: string, readonly token: string) {}
+	constructor(readonly url: string, readonly token: (force?: boolean) => Promise<string>) {}
 
-	async #rpc(method: string, params?: unknown, notify = false): Promise<any> {
+	async #rpc(method: string, params?: unknown, notify = false, retried = false): Promise<any> {
 		const headers: Record<string, string> = {
 			"content-type": "application/json", accept: "application/json, text/event-stream",
-			authorization: `Bearer ${this.token}`, "mcp-protocol-version": "2025-06-18",
+			authorization: `Bearer ${await this.token(retried)}`, "mcp-protocol-version": "2025-06-18",
 		};
 		if (this.#session) headers["mcp-session-id"] = this.#session;
 		const id = notify ? undefined : ++this.#id;
 		const r = await fetch(this.url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", method, params, id }) });
 		this.#session = r.headers.get("mcp-session-id") ?? this.#session;
+		if (r.status === 401 && !retried) return this.#rpc(method, params, notify, true);
 		if (r.status === 404 && this.#session && method !== "initialize") {
 			this.#session = this.#ready = undefined;
 			await this.#init();

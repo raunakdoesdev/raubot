@@ -19,10 +19,12 @@ import { DoSqlite } from "./sql.ts";
 import type { Box } from "./box.ts";
 export { Box } from "./box.ts";
 import { Mcp } from "./mcp.ts";
+import { OAuth } from "./oauth.ts";
+import settings from "./settings.html";
 import tree from "./tree.html";
 import ui from "./ui.html";
 
-type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Box>; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL?: string; EXECUTOR_API_KEY?: string; MODEL: string; COMPACT_MODEL: string };
+type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Box>; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string };
 
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
@@ -54,6 +56,7 @@ const markView = (marks: number) => (payload: unknown) => {
 
 export class Raubot extends DurableObject<Env> {
 	memory!: Memory;
+	oauth!: OAuth;
 	harness!: Harness;
 	root!: Conversation;
 	state!: AttachedReplicatedState<ConversationView>;
@@ -69,9 +72,8 @@ export class Raubot extends DurableObject<Env> {
 
 	/** Executor's MCP tools (skills/execute/resume), passed through as-is; schemas cached so the prompt stays byte-stable. */
 	async #executor() {
-		const { EXECUTOR_URL: url, EXECUTOR_API_KEY: key } = this.env;
-		if (!url || !key) return [];
-		const mcp = new Mcp(url, key);
+		if (!(await this.oauth.connected())) return [];
+		const mcp = new Mcp(this.env.EXECUTOR_URL, (force) => this.oauth.token(force));
 		let list = await this.ctx.storage.get<Awaited<ReturnType<Mcp["tools"]>>>("executor-tools");
 		if (!list) {
 			try { list = await mcp.tools(); await this.ctx.storage.put("executor-tools", list); }
@@ -86,6 +88,7 @@ export class Raubot extends DurableObject<Env> {
 	}
 
 	async #init() {
+		this.oauth = new OAuth(this.ctx.storage, this.env.EXECUTOR_URL);
 		const models = createModels({ authContext: { env: async (n) => (this.env as unknown as Record<string, string>)[n], fileExists: async () => false } });
 		models.setProvider(openaiProvider());
 		models.setProvider(anthropicProvider());
@@ -269,6 +272,20 @@ export class Raubot extends DurableObject<Env> {
 			});
 			server.addEventListener("close", () => { clearInterval(tick); this.sockets.delete(server); });
 			return new Response(null, { status: 101, webSocket: client });
+		}
+		if (url.pathname === "/settings") return new Response(settings, { headers: { "content-type": "text/html; charset=utf-8" } });
+		if (url.pathname === "/settings.json") {
+			const tools = await this.ctx.storage.get<unknown[]>("executor-tools");
+			return Response.json({ executor: await this.oauth.connected(), tools: tools?.length ?? 0 });
+		}
+		if (url.pathname === "/oauth/start") return Response.redirect(await this.oauth.start(/^(localhost|127\.0\.0\.1)$/.test(url.hostname) ? url.origin : `https://${url.host}`), 302);
+		if (url.pathname === "/oauth/callback") {
+			try { await this.oauth.callback(url.searchParams); }
+			catch (e) { return new Response(`Executor connection failed: ${e instanceof Error ? e.message : e}`, { status: 400 }); }
+			await this.ctx.storage.delete("executor-tools");
+			// Restart so the Executor tools get registered on the next init.
+			setTimeout(() => this.ctx.abort("executor connected"), 100);
+			return Response.redirect(`${url.origin}/`, 302);
 		}
 		if (url.pathname === "/tree") return new Response(tree, { headers: { "content-type": "text/html; charset=utf-8" } });
 		if (url.pathname === "/tree.json") return Response.json(this.#tree(url.searchParams));
