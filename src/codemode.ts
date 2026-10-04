@@ -17,6 +17,7 @@ export const describe = (tools: Nested[]) => `Run JavaScript that calls other to
 - \`await tools.<name>({ ...args })\` resolves to the tool's text output and rejects with an Error on failure.
 - \`text(value)\`, \`console.log(...)\` and \`return\` add output; \`exit()\` ends the script. \`store(key, value)\` / \`load(key)\` keep JSON values across calls. They are for small state (256 KB in all): write big data such as API dumps to files in /scratch with \`tools.bash\` instead.
 - Use it to batch independent calls (Promise.allSettled), chain them, or filter large output, instead of many separate tool calls.
+- Long work you don't need to wait on: pass \`background: { label, timeout }\` (timeout in seconds, required, max 86400) next to \`code\`. The call returns at once with a job id; the script keeps running, even across restarts, and when it ends its result comes back to you as a \`job\` message. \`tools.jobs()\` lists jobs, \`tools.jobs({ cancel: [id] })\` stops some, \`tools.jobs({ prune: true })\` forgets finished ones. At most 100 run at once.
 - Optional first line: \`// @options: {"timeout_ms": 60000}\`
 
 Nested tools:
@@ -53,10 +54,10 @@ const opts = (deadline: number, finished: () => boolean, signal?: AbortSignal) =
 });
 
 /** Runs a script. With a freezer, the VM is snapshotted (at most once a second) while it waits on tools, and a rerun after a restart thaws it and re-issues only the calls still owed. */
-export async function codemode(source: string, nested: Nested[], store: Store, signal?: AbortSignal, app?: App, freezer?: Freezer) {
+export async function codemode(source: string, nested: Nested[], store: Store, signal?: AbortSignal, app?: App, freezer?: Freezer, until?: number) {
 	const { code, options } = parseCodemodeSource(source);
 	const frozen = await freezer?.load();
-	const deadline = frozen?.deadline ?? Date.now() + Math.min(options.timeoutMs ?? 120_000, 600_000);
+	const deadline = frozen?.deadline ?? until ?? Date.now() + Math.min(options.timeoutMs ?? 120_000, 600_000);
 	const byName = new Map(nested.map((t) => [t.name, t]));
 	if (app) byName.set("__app", { name: "__app", description: "", inputSchema: {}, execute: (({ path, args }: { path: string[]; args: unknown }) => app(path, args)) as Nested["execute"] });
 	const output: string[] = frozen?.output ?? [];

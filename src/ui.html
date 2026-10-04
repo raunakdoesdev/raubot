@@ -64,6 +64,11 @@ const near = () => main.scrollHeight - main.scrollTop - main.clientHeight < 120;
 const down = (force) => { if (force || near()) main.scrollTop = 1e9; };
 let open = [];
 function add(x) {
+  if (x.kind === "job") {
+    const d = document.createElement("details"), s = document.createElement("summary"), p = document.createElement("pre");
+    d.className = "tool msg"; p.textContent = x.text.replace(/^\[via \w+\] /, "");
+    s.textContent = p.textContent.split("\n")[0]; d.append(s, p); log.append(d); return;
+  }
   if (x.kind === "tool" || x.kind === "echo") {
     const name = x.text.split(/[\s:]/)[0];
     const j = x.kind === "echo" ? open.findIndex((o) => o.name === name) : -1;

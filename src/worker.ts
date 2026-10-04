@@ -30,6 +30,7 @@ import ui from "./ui.html";
 type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; SPECTRUM_WEBHOOK_SECRET: string; AI: Ai };
 
 type Origin = { channel: string; to: string };
+type Job = { id: number; label: string; code: string; deadline: number; from: Origin; status: string; started: number; ended?: number };
 
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
@@ -167,7 +168,19 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			execute: () => Promise.reject(new Error("unbound")),
 		};
 		const system = `${MASTER}\n\n${VIEW_DOC}\n\n${SELF}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
-		nested.push(agentDoc);
+		nested.push(agentDoc, {
+			name: "jobs",
+			description: "Your background jobs, newest first: { id, label, status, started, ended, deadline }. `cancel: [ids]` stops running ones (no result comes back); `prune: true` forgets finished ones.",
+			inputSchema: Type.Object({ cancel: Type.Optional(Type.Array(Type.Integer())), prune: Type.Optional(Type.Boolean()) }),
+			execute: async ({ cancel = [], prune }: { cancel?: number[]; prune?: boolean }) => {
+				for (const id of cancel) await this.#cancel(id);
+				const jobs = await this.#jobs();
+				if (prune) await this.ctx.storage.delete(jobs.filter((j) => j.status !== "running").map((j) => `job:${j.id}`));
+				return jobs.filter((j) => !prune || j.status === "running").reverse().map(({ code: _, from: __, ...j }) => j);
+			},
+		});
+		this.#tools = (scope, owner) => nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(scope, owner) } : t));
+		this.#app = executor.app;
 		this.#prompt = `# System prompt\n\n${system}\n\n# codemode tool description\n\n${describe(nested)}\n`;
 		const registry = createRegistry();
 		registry.install(defineExtension({
@@ -175,10 +188,17 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			sections: [section("raubot", () => system, { tag: false })],
 			tools: [defineTool({
 				name: "codemode", replay: "safe", description: describe(nested),
-				parameters: Type.Object({ code: Type.String({ description: "Raw JavaScript source." }) }),
-				execute: async ({ code }, api, ctx) => {
+				parameters: Type.Object({
+					code: Type.String({ description: "Raw JavaScript source." }),
+					background: Type.Optional(Type.Object({ label: Type.String(), timeout: Type.Integer({ description: "Seconds, max 86400." }) })),
+				}),
+				execute: async ({ code, background }, api, ctx) => {
+					if (background) {
+						if (api.conversationId !== this.root.id) throw new Error("Only raubot can start background jobs.");
+						return { content: [{ type: "text", text: await this.#start(code, background.label, background.timeout) }] };
+					}
 					const store = (await this.ctx.storage.get<Record<string, unknown>>("codemode-store")) ?? {};
-					const tools = nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(api, ctx) } : t));
+					const tools = this.#tools(String(api.taskId), { api, ctx });
 					const freezer = this.#freezer(String(api.taskId));
 					const r = await codemode(code, tools, store, (ctx as { signal?: AbortSignal }).signal, executor.app, freezer);
 					await freezer.clear();
@@ -214,6 +234,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			void this.#deliver().catch((e) => console.error("deliver", e));
 		});
 		this.harness.resume();
+		void this.#resumeJobs();
 		await this.#sync();
 		this.memory.pump();
 		this.#changed();
@@ -241,7 +262,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				for (const m of e.model ?? []) {
 					const date = m.timestamp ?? Date.now();
 					if (m.role === "assistant" && m.usage) this.#usage({ date, ...m.usage });
-					if (m.role === "user") this.#log("user", text(m.content), date);
+					if (m.role === "user") { const t = text(m.content); this.#log(/^(\[via \w+\] )?\[job \d+ /.test(t) ? "job" : "user", t, date); }
 					else if (m.role === "toolResult") this.#log("echo", `${m.toolName}: ${text(m.content)}`, date);
 					else for (const b of m.content) {
 						if (typeof b === "string") continue;
@@ -299,6 +320,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	async #deliver() {
 		const r = await this.ctx.storage.get<Origin & { start: number }>("reply");
 		const reply = r && !this.busy() && this.memory.log.slice(r.start).filter((m) => m.kind === "talk").at(-1)?.text;
+		if (r && !reply && !this.busy() && this.memory.log.length > r.start + 1) await this.ctx.storage.delete("reply"); // ended silent
 		if (!reply || this.#delivering) return;
 		this.#delivering = true;
 		try {
@@ -335,20 +357,28 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	}
 
 	/** `tools.agent`: a child conversation owned by the codemode call, keyed by the script's call id so a thawed script finds it again. */
-	#agent(api: ToolExecutionApi, ctx: Context) {
+	#agent(scope: string, owner?: { api: ToolExecutionApi; ctx: Context }) {
+		const ctx = owner?.ctx ?? C;
 		return async ({ task, schema }: { task: string; schema?: object }, call: number) => {
-			if (api.conversationId !== this.root.id) throw new Error("A subagent can't start subagents.");
-			const key = `agent:${api.taskId}:${call}`;
+			if (owner && owner.api.conversationId !== this.root.id) throw new Error("A subagent can't start subagents.");
+			const key = `agent:${scope}:${call}`;
 			let id = await this.ctx.storage.get<number>(key);
 			if (!id) {
-				id = await api.commit(async (tx) => {
-					const c = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
-					await configure(tx, c.id, { instructions: SUBAGENT });
-					return c.id as unknown as number;
-				}, ctx);
+				// A foreground call owns its children (Esc stops them); a background job's children are ownerless.
+				id = owner
+					? await owner.api.commit(async (tx) => {
+						const c = await tx.createConversation({ ownership: { kind: "task", taskId: owner.api.taskId } });
+						await configure(tx, c.id, { instructions: SUBAGENT });
+						return c.id as unknown as number;
+					}, ctx)
+					: await (async () => {
+						const c = await this.harness.createConversation({ ownership: { kind: "ownerless" } }, C);
+						await c.configure({ instructions: SUBAGENT }, C);
+						return c.id as unknown as number;
+					})();
 				await this.ctx.storage.put(key, id);
 			}
-			const child = (await api.conversation(id as never, ctx))!;
+			const child = (owner ? await owner.api.conversation(id as never, ctx) : await this.harness.conversation(id as never, C))!;
 			const ask = async (content: string, n: number) => {
 				await (await child.submit({ type: "input", content, requestId: `${key}:${n}` }, ctx)).wait(ctx);
 				const page = await (await this.harness.conversation(id as never, C))!.entries({}, 50, undefined, C);
@@ -369,6 +399,55 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				reply = await ask(`That reply doesn't match the schema (${err}). Reply again with only the JSON.${shape}`, n);
 			}
 		};
+	}
+
+	#tools!: (scope: string, owner?: { api: ToolExecutionApi; ctx: Context }) => Nested[];
+	#app?: App;
+	#running = new Map<number, AbortController>();
+
+	async #jobs() { return [...(await this.ctx.storage.list<Job>({ prefix: "job:" })).values()].sort((a, b) => a.id - b.id); }
+
+	/** A background job is a codemode script the DO runs outside any turn; it inherits the turn's channel and reports back as a `job` message. */
+	async #start(code: string, label: string, timeout: number) {
+		if ((await this.#jobs()).filter((j) => j.status === "running").length >= 100) throw new Error("100 jobs are already running: cancel some first.");
+		const id = (await this.ctx.storage.get<number>("job-next")) ?? 1;
+		const from = (await this.ctx.storage.get<Origin>("reply")) ?? { channel: "app", to: "" };
+		const job: Job = { id, label, code, from: { channel: from.channel, to: from.to }, status: "running", started: Date.now(), deadline: Date.now() + Math.min(Math.max(timeout, 1), 86_400) * 1000 };
+		await this.ctx.storage.put({ "job-next": id + 1, [`job:${id}`]: job });
+		void this.#run(job);
+		await this.ctx.storage.setAlarm(Date.now() + 30_000);
+		return `Started job ${id} (${label}). Its result will come back to you as a job message.`;
+	}
+
+	async #run(job: Job) {
+		if (this.#running.has(job.id)) return;
+		const ac = new AbortController();
+		this.#running.set(job.id, ac);
+		const freezer = this.#freezer(`job:${job.id}`);
+		const store = (await this.ctx.storage.get<Record<string, unknown>>("codemode-store")) ?? {};
+		const r = await codemode(job.code, this.#tools(`job:${job.id}`), store, ac.signal, this.#app, freezer, job.deadline);
+		this.#running.delete(job.id);
+		await freezer.clear();
+		const now = await this.ctx.storage.get<Job>(`job:${job.id}`);
+		if (!now || now.status !== "running") return; // cancelled or cleared
+		const status = !r.error ? "done" : Date.now() > job.deadline ? "timed out" : "failed";
+		await this.ctx.storage.put(`job:${job.id}`, { ...now, status, ended: Date.now() });
+		await this.send(`[job ${job.id} ${status}] ${job.label}\n${r.text}`, job.from);
+	}
+
+	async #cancel(id: number) {
+		const job = await this.ctx.storage.get<Job>(`job:${id}`);
+		if (job?.status !== "running") return;
+		await this.ctx.storage.put(`job:${id}`, { ...job, status: "cancelled", ended: Date.now() });
+		this.#running.get(id)?.abort();
+		for (const c of (await this.ctx.storage.list<number>({ prefix: `agent:job:${id}:` })).values()) await (await this.harness.conversation(c as never, C))?.abort(C);
+	}
+
+	/** Picks up jobs a restart interrupted; returns whether any still run. */
+	async #resumeJobs() {
+		const running = (await this.#jobs()).filter((j) => j.status === "running");
+		for (const j of running) void this.#run(j);
+		return running.length > 0;
 	}
 
 	busy() { return (this.state.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; }
@@ -402,7 +481,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	async alarm() {
 		this.memory.pump();
-		if (this.memory.pending()) await this.ctx.storage.setAlarm(Date.now() + 30_000);
+		if ((await this.#resumeJobs()) || this.memory.pending()) await this.ctx.storage.setAlarm(Date.now() + 30_000);
 	}
 
 	async fetch(req: Request): Promise<Response> {
