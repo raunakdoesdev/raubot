@@ -372,8 +372,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 						return c.id as unknown as number;
 					}, ctx)
 					: await (async () => {
-						const c = await this.harness.createConversation({ ownership: { kind: "ownerless" } }, C);
-						await c.configure({ instructions: SUBAGENT }, C);
+						const c = await this.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium", instructions: SUBAGENT } }, C);
 						return c.id as unknown as number;
 					})();
 				await this.ctx.storage.put(key, id);
