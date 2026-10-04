@@ -1,11 +1,9 @@
 // The web app: a client of the core. It serves the pages and turns HTTP/WebSocket calls into `Core` calls.
 import type { Core } from "../core/api.ts";
 import type { Computer } from "../core/box.ts";
-import tree from "./tree.html";
 import og from "./og.png";
 import { TTLS } from "./ttl.ts";
 
-const html = (s: string) => new Response(s, { headers: { "content-type": "text/html; charset=utf-8" } });
 const TOKEN = /^\/s\/([\w-]{32})(\.json)?$/;
 
 export type EdgeEnv = { BOX: DurableObjectNamespace<Computer>; ASSETS: Fetcher };
@@ -14,7 +12,7 @@ export type EdgeEnv = { BOX: DurableObjectNamespace<Computer>; ASSETS: Fetcher }
 export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Promise<Response>) => {
 	const url = new URL(req.url), { pathname } = url;
 	const asset = (p: string) => env.ASSETS.fetch(new URL(p, url));
-	if (pathname === "/" || pathname === "/settings" || pathname.startsWith("/assets/")) return asset(pathname);
+	if (pathname === "/" || pathname === "/settings" || pathname === "/tree" || pathname.startsWith("/assets/")) return asset(pathname);
 	// Secret links skip Access, so their page loads its assets relative to /s/.
 	if (pathname.startsWith("/s/assets/")) return asset(pathname.slice(2));
 	if (pathname === "/s/og.png") return new Response(og, { headers: { "content-type": "image/png", "cache-control": "public, max-age=86400" } });
@@ -74,7 +72,6 @@ export const serve = async (core: Core, req: Request): Promise<Response> => {
 	switch (url.pathname) {
 		case "/ws": return socket(core);
 		case "/settings.json": return Response.json(await core.settings());
-		case "/tree": return html(tree);
 		case "/tree.json": return Response.json(core.tree(url.searchParams));
 		case "/prompt": return new Response(core.prompt(), { headers: { "content-type": "text/plain; charset=utf-8" } });
 		case "/secrets.json":
