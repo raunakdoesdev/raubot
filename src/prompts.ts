@@ -39,3 +39,8 @@ const scale =
 	"User asked to move the billing worker off the shared queue; we agreed on a dedicated SQS queue with a 5 minute visibility timeout and a DLQ after 3 tries. I wrote the Terraform (queue, DLQ, IAM policy for the worker role), ran plan, and the user approved apply. Apply succeeded; the worker now polls billing-prod. User prefers small PRs and wants no changes to the invoice schema. Open: backfill of the 2,140 stuck jobs from the old queue, pending the user's go-ahead; the alert threshold for DLQ depth was not decided yet. ";
 export const SCALE = scale.slice(0, NODE);
 export const COMPACT_PROMPT = COMPACT + SCALE;
+
+export const EXECUTOR = `The executor_* tools reach the user's connected apps and accounts through Executor (credentials never pass through you).
+- executor_skills reads app instructions; executor_execute runs a short JavaScript program where app tools are async functions under \`tools\`.
+- Start with \`return await tools.search({ query: "..." })\` inside executor_execute to find exact tool paths and signatures, then call them and return only what you need.
+- If a call pauses for approval or input, show the user the request, wait for their answer, then call executor_resume with it. Never rerun a program to get past a refusal.`;

@@ -14,14 +14,15 @@ import type { EntryId } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
-import { MARKS, MASTER, SELF, VIEW_DOC } from "./prompts.ts";
+import { EXECUTOR, MARKS, MASTER, SELF, VIEW_DOC } from "./prompts.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Box } from "./box.ts";
 export { Box } from "./box.ts";
+import { Mcp } from "./mcp.ts";
 import tree from "./tree.html";
 import ui from "./ui.html";
 
-type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Box>; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; MODEL: string; COMPACT_MODEL: string };
+type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Box>; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL?: string; EXECUTOR_API_KEY?: string; MODEL: string; COMPACT_MODEL: string };
 
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
@@ -66,6 +67,24 @@ export class Raubot extends DurableObject<Env> {
 		ctx.blockConcurrencyWhile(() => this.#init());
 	}
 
+	/** Executor's MCP tools (skills/execute/resume), passed through as-is; schemas cached so the prompt stays byte-stable. */
+	async #executor() {
+		const { EXECUTOR_URL: url, EXECUTOR_API_KEY: key } = this.env;
+		if (!url || !key) return [];
+		const mcp = new Mcp(url, key);
+		let list = await this.ctx.storage.get<Awaited<ReturnType<Mcp["tools"]>>>("executor-tools");
+		if (!list) {
+			try { list = await mcp.tools(); await this.ctx.storage.put("executor-tools", list); }
+			catch (e) { console.error("executor", e); return []; }
+		}
+		return list.map((t) => defineTool({
+			name: `executor_${t.name}`, replay: "unsafe",
+			description: t.description ?? t.name,
+			parameters: Type.Unsafe<Record<string, unknown>>(t.inputSchema),
+			execute: async (args) => ({ content: [{ type: "text", text: await mcp.call(t.name, args).catch((e) => `error: ${e.message}`) }] }),
+		}));
+	}
+
 	async #init() {
 		const models = createModels({ authContext: { env: async (n) => (this.env as unknown as Record<string, string>)[n], fileExists: async () => false } });
 		models.setProvider(openaiProvider());
@@ -82,11 +101,13 @@ export class Raubot extends DurableObject<Env> {
 		}, () => this.#changed());
 
 		const memory = this.memory;
+		const executor = await this.#executor();
 		const registry = createRegistry();
 		registry.install(defineExtension({
 			name: "raubot",
-			sections: [section("raubot", () => `${MASTER}\n\n${VIEW_DOC}\n\n${SELF}`, { tag: false })],
+			sections: [section("raubot", () => `${MASTER}\n\n${VIEW_DOC}\n\n${SELF}${executor.length ? `\n\n${EXECUTOR}` : ""}`, { tag: false })],
 			tools: [
+				...executor,
 				defineTool({
 					name: "bash", replay: "unsafe",
 					description: "Run a bash command in your Linux box (cwd /workspace). Output is combined stdout+stderr with the exit code. Default timeout 120s, max 900s.",
