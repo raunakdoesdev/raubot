@@ -135,6 +135,3 @@ export class Computer extends DurableObject<Env> {
 		await this.ctx.storage.setAlarm(Date.now() + TICK);
 	}
 }
-
-/** Legacy container app (default scheduling policy, no snapshots). Kept until it's deleted. */
-export class Box extends DurableObject {}

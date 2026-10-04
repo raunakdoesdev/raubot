@@ -17,7 +17,7 @@ import { Memory, type Msg } from "./memory.ts";
 import { EXECUTOR, MARKS, MASTER, SELF, VIEW_DOC } from "./prompts.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Computer } from "./box.ts";
-export { Box, Computer } from "./box.ts";
+export { Computer } from "./box.ts";
 import { type App, codemode, describe, type Nested } from "./codemode.ts";
 import { Mcp } from "./mcp.ts";
 import { OAuth } from "./oauth.ts";
