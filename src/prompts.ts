@@ -40,7 +40,7 @@ const scale =
 export const SCALE = scale.slice(0, NODE);
 export const COMPACT_PROMPT = COMPACT + SCALE;
 
-export const EXECUTOR = `The executor_* tools reach the user's connected apps and accounts through Executor (credentials never pass through you).
-- executor_skills reads app instructions; executor_execute runs a short JavaScript program where app tools are async functions under \`tools\`.
-- Start with \`return await tools.search({ query: "..." })\` inside executor_execute to find exact tool paths and signatures, then call them and return only what you need.
+export const EXECUTOR = `Inside codemode, tools.executor_* reach the user's connected apps and accounts through Executor (credentials never pass through you).
+- executor_skills reads app instructions; executor_execute runs its own JavaScript program (passed as a string in \`code\`) where app tools are async functions under \`tools\`.
+- Start with \`return await tools.search({ query: "..." })\` inside that program to find exact tool paths and signatures, then call them and return only what you need.
 - If a call pauses for approval or input, show the user the request, wait for their answer, then call executor_resume with it. Never rerun a program to get past a refusal.`;

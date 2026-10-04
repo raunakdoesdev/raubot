@@ -14,7 +14,9 @@
   "dependencies": {
     "@earendil-works/chord": "^1.0.2",
     "@earendil-works/pi-ai": "^1.0.2",
-    "@earendil-works/pi-durable": "^1.0.2"
+    "@earendil-works/pi-codemode": "^1.0.2",
+    "@earendil-works/pi-durable": "^1.0.2",
+    "quickjs-wasi": "^3.6.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261004.1",
