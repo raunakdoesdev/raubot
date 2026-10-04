@@ -25,7 +25,7 @@ import settings from "./settings.html";
 import tree from "./tree.html";
 import ui from "./ui.html";
 
-type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; SPECTRUM_WEBHOOK_SECRET: string };
+type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; SPECTRUM_WEBHOOK_SECRET: string; AI: Ai };
 
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
@@ -135,6 +135,22 @@ export class Raubot extends DurableObject<Env> {
 				description: "When message id was logged.",
 				inputSchema: Type.Object({ id: Type.Integer() }),
 				execute: async ({ id }: { id: number }) => memory.date(id),
+			},
+			{
+				name: "decide",
+				description: `Decision API: a very cheap, fast model (Cloudflare Clef) that reads a state and answers typed questions with probabilities, no prose. Use it to triage, filter or score lots of data (messages, records, logs, pages) instead of reading it all yourself: call it once per item, in parallel.
+state: text or JSON (up to ~64k tokens). questions: map of id to
+  { type: "noul", instructions } -> { noul: P(yes) }
+  { type: "choice", instructions, criteria: { option: description | null, ... } } -> { choice, probabilities, confidence }
+  { type: "score", instructions, criteria: [lowest level, ..., highest] } -> { score, probabilities, confidence }
+model: "clef-flash" (default, 9B, fastest) or "clef" (27B, more accurate). Returns { answers } keyed by question id.
+Example: find the Slack messages that need the user's attention.
+  // msgs: an array you fetched, e.g. Slack messages from an Executor app
+  const r = await Promise.all(msgs.map((m) => tools.decide({ state: m, questions: { act: { type: "noul", instructions: "Does this need the user to reply or act?" } } })));
+  return msgs.filter((m, i) => r[i].answers.act.noul > 0.7);`,
+				inputSchema: Type.Object({ state: Type.Unknown(), questions: Type.Record(Type.String(), Type.Unknown()), model: Type.Optional(Type.String()) }),
+				execute: async ({ state, questions, model = "clef-flash" }: { state: unknown; questions: Record<string, unknown>; model?: string }) =>
+					JSON.stringify(await this.env.AI.run(`@cf/cloudflare/${model}` as keyof AiModels, { model, state, questions } as never)),
 			},
 			...executor.nested,
 		];

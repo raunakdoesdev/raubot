@@ -7,6 +7,7 @@
 	"routes": [{ "pattern": "raubot.reducto.ai", "custom_domain": true }],
 	"vars": { "PROVIDER": "openrouter",
 		"MODEL": "anthropic/claude-opus-5.5", "COMPACT_MODEL": "z-ai/glm-5.3-flash", "EXECUTOR_URL": "https://v2.executor.sh/mcp" },
+	"ai": { "binding": "AI" },
 	"artifacts": [{ "binding": "ARTIFACTS", "namespace": "raubot" }],
 	"durable_objects": { "bindings": [{ "name": "RAUBOT", "class_name": "Raubot" }, { "name": "BOX", "class_name": "Computer" }] },
 	"containers": [
@@ -18,6 +19,7 @@
 			"routes": [{ "pattern": "raubot-staging.reducto.ai", "custom_domain": true }],
 			"vars": { "PROVIDER": "openrouter",
 				"MODEL": "anthropic/claude-opus-5.5", "COMPACT_MODEL": "z-ai/glm-5.3-flash", "EXECUTOR_URL": "https://v2.executor.sh/mcp" },
+			"ai": { "binding": "AI" },
 			"artifacts": [{ "binding": "ARTIFACTS", "namespace": "raubot-staging" }],
 			"durable_objects": { "bindings": [{ "name": "RAUBOT", "class_name": "Raubot" }, { "name": "BOX", "class_name": "Computer" }] },
 			"containers": [
