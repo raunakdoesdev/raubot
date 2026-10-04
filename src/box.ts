@@ -26,7 +26,7 @@ cd raubot && [ -d node_modules ] || npm ci --silent --no-audit --no-fund`;
 /** Files over 10 MB are kept out of git (Artifacts caps files at 32 MB); snapshots keep them. */
 const SAVE = `git ls-files -oz --exclude-standard | xargs -0 -r sh -c 'find "$@" -maxdepth 0 -size +10M' _ >> .gitignore; git add -A && { git diff --cached --quiet || git commit -qm "$MSG"; } && { git push -q origin HEAD:main 2>&1 || git pull -q --rebase origin main && git push -q origin HEAD:main; }`;
 
-export class Box extends DurableObject<Env> {
+export class Computer extends DurableObject<Env> {
 	#ready?: Promise<void>;
 	#note = "";
 	#env: Record<string, string> = {};
@@ -55,11 +55,11 @@ export class Box extends DurableObject<Env> {
 				CLOUDFLARE_API_TOKEN: this.env.CF_DEPLOY_TOKEN,
 				CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
 			});
-			const image = c.images.box ?? Object.values(c.images)[0];
+			const image = c.images.box;
 			const snap = await this.ctx.storage.get<{ id: string; image: string }>("snapshot");
 			const restore = !c.running && snap?.image === image;
 			if (!c.running) {
-				c.start({ ...(restore ? { containerSnapshot: { id: snap.id } } : { image }), enableInternet: true, env });
+				c.start({ ...(restore ? { containerSnapshot: { id: snap.id } } : { image }), instance: "standard-1", enableInternet: true, env });
 				await this.ctx.storage.put("saved", Date.now());
 			}
 			for (let i = 0; ; i++) {
@@ -96,6 +96,29 @@ export class Box extends DurableObject<Env> {
 		}
 	}
 
+	async #snapshot() {
+		const c = this.ctx.container!;
+		const saved = Date.now();
+		const { id, size } = await c.snapshotContainer({ name: "box" });
+		await this.ctx.storage.put({ snapshot: { id, size, image: c.images.box }, saved });
+	}
+
+	/** Snapshot and stop the box now (debug: POST /box). */
+	async stop() {
+		const c = this.ctx.container!;
+		if (c.running) {
+			await this.#snapshot();
+			this.#ready = undefined;
+			await c.destroy("stop");
+		}
+		return this.status();
+	}
+
+	async status() {
+		const [snapshot, last, saved, alarm] = await Promise.all(["snapshot", "last", "saved"].map((k) => this.ctx.storage.get(k)).concat(this.ctx.storage.getAlarm()));
+		return { running: this.ctx.container!.running, images: this.ctx.container!.images, snapshot, last, saved, alarm };
+	}
+
 	async alarm() {
 		const c = this.ctx.container!;
 		if (!c.running) return;
@@ -103,10 +126,7 @@ export class Box extends DurableObject<Env> {
 		const last = (await this.ctx.storage.get<number>("last")) ?? 0;
 		const saved = (await this.ctx.storage.get<number>("saved")) ?? 0;
 		const idle = !this.#busy && now - last > IDLE;
-		if (idle || (!this.#busy && last > saved && now - saved > CHECKPOINT)) {
-			const { id } = await c.snapshotContainer({ name: "box" });
-			await this.ctx.storage.put({ snapshot: { id, image: c.images.box ?? Object.values(c.images)[0] }, saved: now });
-		}
+		if (idle || (!this.#busy && last > saved && now - saved > CHECKPOINT)) await this.#snapshot();
 		if (idle && !this.#busy && (await this.ctx.storage.get<number>("last")) === last) {
 			this.#ready = undefined;
 			return c.destroy("idle");
@@ -115,3 +135,6 @@ export class Box extends DurableObject<Env> {
 		await this.ctx.storage.setAlarm(Date.now() + TICK);
 	}
 }
+
+/** Legacy container app (default scheduling policy, no snapshots). Kept until it's deleted. */
+export class Box extends DurableObject {}
