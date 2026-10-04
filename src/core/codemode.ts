@@ -4,7 +4,7 @@ import { JSException, MAX_STACK_SIZE, QuickJS } from "quickjs-wasi";
 import wasm from "quickjs-wasi/quickjs.wasm";
 import { renderToolSample, toCodemodeIdentifier } from "@earendil-works/pi-codemode/declarations";
 import { parseCodemodeSource } from "@earendil-works/pi-codemode/source";
-import { PRELUDE_SOURCE } from "../node_modules/@earendil-works/pi-codemode/dist/runtime/prelude-source.js";
+import { PRELUDE_SOURCE } from "../../node_modules/@earendil-works/pi-codemode/dist/runtime/prelude-source.js";
 
 /** `call` is the script's call id: stable across a snapshot restore, so a tool can key durable work on it. */
 export type Nested = { name: string; description: string; inputSchema: object; execute: (args: never, call: number) => Promise<unknown> };

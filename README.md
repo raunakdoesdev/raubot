@@ -8,12 +8,20 @@ The design follows Victor Taelin's [OptChat](https://gist.github.com/VictorTaeli
 
 ## Layout
 
-- `src/worker.ts`: the Worker and the `Raubot` Durable Object. It sets up the pi harness, the `zoom`/`date` tools and the hook that injects the view, then serves a WebSocket at `/ws` and the summary tree at `/tree`.
-- `src/memory.ts`: the log, the summary tree, the compactor (8 parallel jobs, retries) and the incremental view fold (128 KB budget, "most due pair" merging).
-- `src/sql.ts`: pi-durable's `SqliteDatabase` interface over `ctx.storage.sql`.
-- `src/prompts.ts`: the system and compactor prompts, plus the constants.
-- `src/box.ts`: the `Computer` container (Durable Object scheduling policy, needed for snapshots) behind the `bash` tool. `/workspace` is a clone of the Artifacts repo `raubot/workspace`, auto-committed and pushed after every command (files over 10 MB are git-ignored). The whole container filesystem is also saved as a Container snapshot when idle for 10 minutes (and every 15 minutes while in use), so installs and big files persist. `/workspace/raubot` is a clone of this repo. The box rules (setup.sh, /scratch, self-deploy) live in `BOX.md`, which the prompt points raubot to.
-- `src/ui.html`: a minimal chat page.
+- `src/worker.ts`: the Worker entry. It serves the app's edge routes and sends everything else to the `Raubot` Durable Object.
+- `src/core/`: raubot itself, with no UI code.
+  - `raubot.ts`: the `Raubot` Durable Object. It sets up the pi harness, the codemode tool and the hook that injects the view, and implements `Core` (`api.ts`), the interface clients use.
+  - `channels/`: one adapter per way of reaching the user besides the app (`imessage.ts` for now). Each `Channel` has a `name`, a reply `style` for the prompt, `receive` (webhook at `POST /<name>`, verified and deduped) and `send`. A turn's reply goes back to the channel of the message that started it. To add Slack, add `slack.ts` and register it in `channels/index.ts`.
+  - `codemode.ts`: the QuickJS runner. Scripts are durable: while one waits on tools, its VM is snapshotted (`freezer.ts`), and a restart thaws it.
+  - `agents.ts`: `tools.agent({ task, schema? })`, subagents as child pi-durable conversations.
+  - `jobs.ts`: background codemode jobs (label, timeout, max 100 running), which report back as `job` messages.
+  - `fx.ts`: the shared Effect services (`Storage`, `Box`) and `runner`, which runs effects at promise edges. Channels, jobs, agents, freezer and box are written with Effect.
+  - `memory.ts`: the log, the summary tree, the compactor (8 parallel jobs, retries) and the incremental view fold (128 KB budget, "most due pair" merging).
+  - `sql.ts`: pi-durable's `SqliteDatabase` interface over `ctx.storage.sql`.
+  - `prompts.ts`: the system and compactor prompts, plus the constants.
+  - `mcp.ts`, `oauth.ts`: the Executor client and its OAuth.
+  - `box.ts`: the `Computer` container (Durable Object scheduling policy, needed for snapshots) behind the `bash` tool. `/workspace` is a clone of the Artifacts repo `raubot/workspace`, auto-committed and pushed after every command (files over 10 MB are git-ignored). The whole container filesystem is also saved as a Container snapshot when idle for 10 minutes (and every 15 minutes while in use), so installs and big files persist. `/workspace/raubot` is a clone of this repo. The box rules (setup.sh, /scratch, self-deploy) live in `BOX.md`, which the prompt points raubot to.
+- `src/app/`: the web app, a client of `Core`. `index.ts` serves the chat, settings and tree pages, plus the `/ws` WebSocket that streams `CoreEvent`s.
 
 ## Source and deploys
 
