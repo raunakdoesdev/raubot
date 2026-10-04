@@ -17,13 +17,13 @@ export class BoxError extends Data.TaggedError("BoxError")<{ message: string }> 
 
 /** The Linux box. */
 export class Box extends Context.Tag("Box")<Box, {
-	bash(cmd: string, timeout: number): Effect.Effect<string, BoxError>;
+	bash(cmd: string, timeout: number, env?: Record<string, string>): Effect.Effect<string, BoxError>;
 	write(path: string, bytes: Uint8Array): Effect.Effect<void, BoxError>;
 }>() {}
 
 export const BoxLive = (ns: DurableObjectNamespace<Computer>) => Layer.succeed(Box, {
-	bash: (cmd, timeout) => Effect.tryPromise({
-		try: () => ns.getByName("main").bash(cmd, timeout) as Promise<string>,
+	bash: (cmd, timeout, env) => Effect.tryPromise({
+		try: () => ns.getByName("main").bash(cmd, timeout, env) as Promise<string>,
 		catch: (e) => new BoxError({ message: String(e) }),
 	}),
 	write: (path, bytes) => Effect.tryPromise({
@@ -32,7 +32,7 @@ export const BoxLive = (ns: DurableObjectNamespace<Computer>) => Layer.succeed(B
 	}),
 });
 
-export const bash = (cmd: string, timeout: number) => Effect.flatMap(Box, (b) => b.bash(cmd, timeout));
+export const bash = (cmd: string, timeout: number, env?: Record<string, string>) => Effect.flatMap(Box, (b) => b.bash(cmd, timeout, env));
 export const write = (path: string, bytes: Uint8Array) => Effect.flatMap(Box, (b) => b.write(path, bytes));
 
 /** Runs an effect at a promise edge; a typed failure is rethrown as itself so callers see its message. */

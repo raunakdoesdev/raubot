@@ -29,10 +29,11 @@ import * as frozen from "./freezer.ts";
 import { bash, Box, BoxLive, runner, Storage, write } from "./fx.ts";
 import { JobHost, Jobs, JobsLive } from "./jobs.ts";
 import { OAuth } from "./oauth.ts";
+import { redact, Secrets, SecretsLive } from "./secrets.ts";
 
-type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
+type Env = { SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
 
-type Services = Storage | Box | Jobs | JobHost;
+type Services = Storage | Box | Jobs | JobHost | Secrets;
 
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
@@ -130,7 +131,7 @@ export class Raubot extends DurableObject<Env> implements Core {
 			},
 		});
 		const base = Layer.mergeAll(Layer.succeed(Storage, this.ctx.storage), BoxLive(this.env.BOX), host);
-		this.#fx = runner(ManagedRuntime.make(Layer.provideMerge(JobsLive, base)));
+		this.#fx = runner(ManagedRuntime.make(Layer.mergeAll(Layer.provideMerge(JobsLive, base), Layer.provide(SecretsLive(this.env.SECRETS_KEY), base))));
 		const models = createModels({ authContext: { env: async (n) => (this.env as unknown as Record<string, string>)[n], fileExists: async () => false } });
 		models.setProvider(openaiProvider());
 		models.setProvider(anthropicProvider());
@@ -150,9 +151,19 @@ export class Raubot extends DurableObject<Env> implements Core {
 		const nested: Nested[] = [
 			{
 				name: "bash",
-				description: "Run a bash command in your Linux box (cwd /workspace). Output is combined stdout+stderr with the exit code. Default timeout 120s, max 900s.",
+				description: "Run a bash command in your Linux box (cwd /workspace). Output is combined stdout+stderr with the exit code. Default timeout 120s, max 900s. Your secrets are env vars in every command.",
 				inputSchema: Type.Object({ cmd: Type.String(), timeout: Type.Optional(Type.Integer()) }),
-				execute: ({ cmd, timeout }: { cmd: string; timeout?: number }) => this.#fx(bash(cmd, Math.min(timeout ?? 120, 900))),
+				execute: ({ cmd, timeout }: { cmd: string; timeout?: number }) => this.#fx(Effect.gen(function* () {
+					const env = yield* Effect.flatMap(Secrets, (s) => s.env());
+					return redact(env, yield* bash(cmd, Math.min(timeout ?? 120, 900), env));
+				})),
+			},
+			{
+				name: "secrets",
+				description: `Your secrets (API keys, tokens, passwords): [{ name, why, set, expires }]. You never see values: each one is an env var ($NAME) in every tools.bash command, and any value printed comes back as [secret NAME]. Use them in place (curl -H "Authorization: Bearer $GITHUB_TOKEN" ...); never write them to files in /workspace, which is pushed to git.
+\`ask: { name, why }\` asks the user for one (name like GITHUB_TOKEN; why is one line shown to them). They get a form to paste it in, and you get a "[secret NAME saved]" message when it's set, so don't wait for it: end your turn. Never ask the user to paste a secret into chat. \`remove: [names]\` deletes secrets.`,
+				inputSchema: Type.Object({ ask: Type.Optional(Type.Object({ name: Type.String(), why: Type.String() })), remove: Type.Optional(Type.Array(Type.String())) }),
+				execute: (args: { ask?: { name: string; why: string }; remove?: string[] }) => this.#secrets(args),
 			},
 			{
 				name: "zoom",
@@ -290,7 +301,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				for (const m of e.model ?? []) {
 					const date = m.timestamp ?? Date.now();
 					if (m.role === "assistant" && m.usage) this.#usage({ date, ...m.usage });
-					if (m.role === "user") { const t = text(m.content); this.#log(/^(\[via \w+\] )?\[job \d+ /.test(t) ? "job" : "user", t, date); }
+					if (m.role === "user") { const t = text(m.content); this.#log(/^(\[via \w+\] )?\[(job \d+|secret \w+) /.test(t) ? "job" : "user", t, date); }
 					else if (m.role === "toolResult") this.#log("echo", `${m.toolName}: ${text(m.content)}`, date);
 					else for (const b of m.content) {
 						if (typeof b === "string") continue;
@@ -430,6 +441,44 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		return path;
 	}
 
+	/** `tools.secrets`: asks go to the app as a form, and to other channels as a link to it. */
+	async #secrets({ ask, remove = [] }: { ask?: { name: string; why: string }; remove?: string[] }) {
+		const from = (await this.ctx.storage.get<Origin>("reply")) ?? APP;
+		const channels = this.#channels, url = this.env.PUBLIC_URL;
+		const asked = await this.#fx(Effect.gen(function* () {
+			const s = yield* Secrets;
+			yield* s.remove(remove);
+			if (!ask) return undefined;
+			const a = yield* s.ask(ask.name, ask.why, { channel: from.channel, to: from.to });
+			if (from.channel !== APP.channel) yield* deliver(channels, from, `🔑 raubot needs ${a.name}: ${a.why}\n${url}/s/${a.token}`);
+			return a;
+		}));
+		if (asked) await this.#asks();
+		const list = await this.#fx(Effect.flatMap(Secrets, (s) => s.list()));
+		return JSON.stringify({ ...(asked && { asked: `Asked the user for ${asked.name}${from.channel === APP.channel ? " in the app" : ` with a link over ${from.channel}`}.` }), secrets: list });
+	}
+
+	async #asks() {
+		const asks = (await this.#fx(Effect.flatMap(Secrets, (s) => s.asks()))).map(({ token, name, why }) => ({ token, name, why }));
+		this.#broadcast({ asks });
+		return asks;
+	}
+
+	async ask(token: string) {
+		const a = await this.#fx(Effect.flatMap(Secrets, (s) => s.find(token)).pipe(Effect.option));
+		return a._tag === "Some" ? { token, name: a.value.name, why: a.value.why } : undefined;
+	}
+
+	async answer(token: string, value: string, ttl?: number) {
+		const a = await this.#fx(Effect.flatMap(Secrets, (s) => s.answer(token, value, ttl)));
+		await this.#asks();
+		await this.send(`[secret ${a.name} saved] The user set ${a.name}${ttl ? `, expiring in ${Math.round(ttl / 3600)}h` : ""}. It's in your bash env now.`, a.from);
+	}
+
+	secrets() { return this.#fx(Effect.flatMap(Secrets, (s) => s.list())); }
+
+	removeSecret(name: string) { return this.#fx(Effect.flatMap(Secrets, (s) => s.remove([name]))); }
+
 	#changed() {
 		this.#broadcast({ log: this.memory.log.length, pending: this.memory.pending(), busy: this.state ? this.busy() : false });
 		if (this.memory.pending()) void this.ctx.storage.setAlarm(Date.now() + 30_000);
@@ -444,7 +493,10 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		return () => void this.#listeners.delete(f);
 	}
 
-	snapshot() { return { history: this.memory.log.slice(-200), busy: this.busy(), pending: this.memory.pending() }; }
+	async snapshot() {
+		const asks = (await this.#fx(Effect.flatMap(Secrets, (s) => s.asks()))).map(({ token, name, why }) => ({ token, name, why }));
+		return { history: this.memory.log.slice(-200), busy: this.busy(), pending: this.memory.pending(), asks };
+	}
 
 	stop() { return this.root.abort(C); }
 
@@ -456,7 +508,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	}
 
 	async reset() {
-		const keep = await this.ctx.storage.get(["oauth-client", "oauth-tokens", "executor-tools"]);
+		const keep = new Map([...await this.ctx.storage.get(["oauth-client", "oauth-tokens", "executor-tools"]), ...await this.ctx.storage.list({ prefix: "secret:" })]);
 		await this.env.BOX.getByName("main").reset();
 		await this.ctx.storage.deleteAlarm();
 		await this.ctx.storage.deleteAll();

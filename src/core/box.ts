@@ -87,12 +87,13 @@ export class Computer extends DurableObject<Env> {
 		})().catch((e) => { this.#ready = undefined; throw e; }));
 	}
 
-	async bash(cmd: string, seconds = 120) {
+	/** `env` is for this command only (secrets): it never reaches the box's own env, git or snapshots. */
+	async bash(cmd: string, seconds = 120, env?: Record<string, string>) {
 		this.#busy++;
 		try {
 			await this.#boot();
 			await this.ctx.storage.put("last", Date.now());
-			const { out, exitCode } = await this.#run(cmd, seconds * 1000);
+			const { out, exitCode } = await this.#run(cmd, seconds * 1000, env);
 			const save = await this.#run(SAVE, 60_000, { MSG: cmd.split("\n")[0].slice(0, 72) });
 			const note = this.#note + (save.exitCode ? `\n[autosave failed]\n${save.out}` : "");
 			this.#note = "";

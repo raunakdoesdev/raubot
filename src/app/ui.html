@@ -49,9 +49,16 @@ button{flex:none;width:36px;height:36px;border:0;border-radius:50%;display:grid;
 #files{display:flex;flex-wrap:wrap;gap:6px}#files:empty{display:none}
 #files span{font-size:13px;background:#2a2a2a;border-radius:8px;padding:3px 8px;color:#bbb}
 button svg{width:18px;height:18px}
+#asks{max-width:720px;margin:0 auto}#asks:empty{display:none}
+.ask{background:var(--card);border:1px solid #3d3522;border-radius:18px;padding:14px 16px;margin:14px 0}
+.ask b{font-weight:600}.ask code{font:14px ui-monospace,Menlo,monospace;background:var(--chip);border-radius:5px;padding:1px 6px}.ask p{margin:2px 0 10px;color:var(--mute);font-size:14px}
+.ask input,.ask select,.ask .save{font:inherit;font-size:15px;color:var(--fg);background:#161616;border:1px solid #3a3a3a;border-radius:12px;padding:9px 12px}
+.ask input{width:100%;font-family:ui-monospace,Menlo,monospace;margin-bottom:8px}.ask .row{display:flex;gap:8px}.ask select{flex:1;min-width:0}
+.ask .save{width:auto;height:auto;border-radius:12px;background:var(--fg);color:#111;border:0;font-weight:600;padding:9px 18px}
 </style>
 <header><b>raubot</b><span id="status"></span><a href="/settings" aria-label="settings">⚙︎</a></header>
-<main id="main"><div id="log"></div><div id="partial" class="md"></div></main>
+<main id="main"><div id="log"></div><div id="partial" class="md"></div><div id="asks"></div></main>
+<template id="ask"><form class="ask"><b>raubot needs <code></code></b><p></p><input name="value" type="password" placeholder="Paste the secret" autocomplete="off" required><div class="row"><select name="ttl"><!--TTLS--></select><button class="save">Save</button></div></form></template>
 <form id="f"><div class="box">
 <div id="files"></div><input type="file" id="pick" multiple hidden>
 <textarea id="t" rows="1" placeholder="Message raubot" enterkeyhint="send" autocomplete="off"></textarea>
@@ -94,11 +101,27 @@ function add(x) {
 }
 let raf = 0, pending = "";
 const showPartial = (s) => { pending = s; if (!raf) raf = requestAnimationFrame(() => { raf = 0; partial.innerHTML = pending ? md(pending) : ""; }); };
+function showAsks(asks) {
+  const box = $("asks"), keep = new Set(asks.map((a) => a.token));
+  for (const el of [...box.children]) if (!keep.has(el.dataset.token)) el.remove();
+  for (const a of asks) {
+    if (box.querySelector(`[data-token="${a.token}"]`)) continue;
+    const f = $("ask").content.firstElementChild.cloneNode(true);
+    f.dataset.token = a.token; f.querySelector("code").textContent = a.name; f.querySelector("p").textContent = a.why;
+    f.onsubmit = async (e) => {
+      e.preventDefault(); const b = f.querySelector(".save"); b.disabled = true;
+      const r = await fetch(`/s/${a.token}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ value: f.value.value, ttl: Number(f.ttl.value) || undefined }) });
+      if (r.ok) f.remove(); else { b.disabled = false; $("status").textContent = await r.text(); }
+    };
+    box.append(f);
+  }
+}
 let ws;
 function connect() {
   ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data), stick = near();
+    if (m.asks) showAsks(m.asks);
     if (m.history) { for (const x of m.history) add(x); showPartial(""); }
     if (m.partial !== undefined) showPartial(m.partial);
     if (m.busy !== undefined) { $("status").textContent = (m.busy ? "thinking… " : "") + (m.pending ? "summarizing" : ""); $("stop").style.display = m.busy ? "grid" : "none"; }
