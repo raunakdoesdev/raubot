@@ -96,7 +96,7 @@ export class Raubot extends DurableObject<Env> {
 		const stream = models.streamSimple.bind(models);
 		models.streamSimple = (model, context, options) =>
 			stream(model, context, model.api === "anthropic-messages" ? { ...options, onPayload: markView(this.#marks) } : options);
-		const compactor = models.getModel("openai", this.env.COMPACT_MODEL)!;
+		const compactor = models.getModel("openrouter", this.env.COMPACT_MODEL)!;
 		this.memory = new Memory(this.ctx.storage.sql, async (systemPrompt, prompt) => {
 			const r = await models.completeSimple(compactor, { systemPrompt, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, { reasoning: "low" });
 			if (r.stopReason === "error" || r.stopReason === "aborted") throw new Error(r.errorMessage ?? r.stopReason);
