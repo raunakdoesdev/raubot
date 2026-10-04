@@ -264,7 +264,7 @@ export class Raubot extends DurableObject<Env> {
 		const reply = this.memory.log.slice(start).filter((m) => m.kind === "talk").at(-1)?.text;
 		if (!reply) return;
 		const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(reply)));
-		await this.env.BOX.getByName("main").bash(`# imessage reply\ncd raubot/imessage && { [ -d node_modules ] || npm i -s; } && SPACE='${space.replace(/'/g, "")}' TEXT_B64=${b64} node send.mjs`, 120);
+		await this.env.BOX.getByName("main").bash(`# imessage reply\ngit -C raubot fetch -q && git -C raubot checkout -q origin/main -- imessage && cd raubot/imessage && { [ -d node_modules ] || npm i -s; } && SPACE='${space.replace(/'/g, "")}' TEXT_B64=${b64} node send.mjs`, 120);
 	}
 
 	busy() { return (this.state.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; }
