@@ -27,6 +27,8 @@ import ui from "./ui.html";
 
 type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; SPECTRUM_WEBHOOK_SECRET: string; AI: Ai };
 
+type Origin = { channel: string; to: string };
+
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
 
@@ -64,7 +66,7 @@ export class Raubot extends DurableObject<Env> {
 	sockets = new Set<WebSocket>();
 	#lock: Promise<unknown> = Promise.resolve();
 	#partial = "";
-	#texting = false;
+	#delivering = false;
 	#marks = 0;
 	#prompt = "";
 
@@ -195,7 +197,7 @@ Example: find the Slack messages that need the user's attention.
 			const partial = msg ? text(msg.content) : "";
 			if (partial !== this.#partial) this.#broadcast({ partial: (this.#partial = partial) });
 			await this.#sync();
-			void this.#textBack().catch((e) => console.error("imessage", e));
+			void this.#deliver().catch((e) => console.error("deliver", e));
 		});
 		this.harness.resume();
 		await this.#sync();
@@ -273,28 +275,32 @@ Example: find the Slack messages that need the user's attention.
 		return sig === `v0=${[...mac].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
 	}
 
-	/** An inbound iMessage joins the same conversation; once the turn ends, its final reply is texted back from the box. */
-	async #imessage(space: string, text: string) {
-		await this.ctx.storage.put("imsg-reply", { space, start: this.memory.log.length });
-		this.send(`[iMessage] ${text}`).catch((e) => console.error("imessage", e));
-	}
+	/** Where a channel's replies go. The app needs none: it shows the whole chat. */
+	#channels: Record<string, (to: string, text: string) => Promise<unknown>> = {
+		// Spectrum's SDK is gRPC, so the box sends the text.
+		imessage: (to, text) => this.env.BOX.getByName("main").bash(`# imessage reply\ngit -C raubot fetch -q && git -C raubot checkout -q origin/main -- imessage && cd raubot/imessage && { [ -d node_modules ] || npm i -s; } && SPACE='${to.replace(/'/g, "")}' TEXT_B64=${btoa(String.fromCharCode(...new TextEncoder().encode(text)))} node send.mjs`, 120),
+	};
 
-	async #textBack() {
-		const r = await this.ctx.storage.get<{ space: string; start: number }>("imsg-reply");
+	/** Once the turn ends, its final reply goes back to the channel that started it. Stored, so a restart mid-turn still delivers. */
+	async #deliver() {
+		const r = await this.ctx.storage.get<Origin & { start: number }>("reply");
 		const reply = r && !this.busy() && this.memory.log.slice(r.start).filter((m) => m.kind === "talk").at(-1)?.text;
-		if (!reply || this.#texting) return;
-		this.#texting = true;
+		if (!reply || this.#delivering) return;
+		this.#delivering = true;
 		try {
-			await this.ctx.storage.delete("imsg-reply");
-			const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(reply)));
-			const out = await this.env.BOX.getByName("main").bash(`# imessage reply\ngit -C raubot fetch -q && git -C raubot checkout -q origin/main -- imessage && cd raubot/imessage && { [ -d node_modules ] || npm i -s; } && SPACE='${r.space.replace(/'/g, "")}' TEXT_B64=${b64} node send.mjs`, 120);
-			console.log("imessage reply", out);
-		} finally { this.#texting = false; }
+			await this.ctx.storage.delete("reply");
+			console.log(r.channel, await this.#channels[r.channel]!(r.to, reply));
+		} finally { this.#delivering = false; }
 	}
 
 	busy() { return (this.state.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; }
 
-	async send(input: string) {
+	/** Every message comes from a channel; non-app ones are tagged for the model and get the turn's reply. */
+	async send(input: string, from: Origin = { channel: "app", to: "" }) {
+		if (from.channel !== "app") {
+			input = `[via ${from.channel}] ${input}`;
+			await this.ctx.storage.put("reply", { ...from, start: this.memory.log.length });
+		}
 		if (this.busy()) return void (await this.root.submit({ type: "input", content: input, whenBusy: "steer" }, C));
 		await this.#serial(async () => {
 			this.#broadcast({ status: "settling" });
@@ -348,7 +354,7 @@ Example: find the Slack messages that need the user's attention.
 			const { message: m } = JSON.parse(body) as { message: { id: string; space: { id: string }; content: { type: string; text?: string } } };
 			if (m.content.type === "text" && m.content.text && !(await this.ctx.storage.get(`imsg:${m.id}`))) {
 				await this.ctx.storage.put(`imsg:${m.id}`, 1);
-				await this.#imessage(m.space.id, m.content.text);
+				this.send(m.content.text, { channel: "imessage", to: m.space.id }).catch((e) => console.error("imessage", e));
 			}
 			return new Response("ok");
 		}
