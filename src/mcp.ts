@@ -52,6 +52,7 @@ export class Mcp {
 		await this.#init();
 		const r = await this.#rpc("tools/call", { name, arguments: args });
 		const out = (r.content as Content[]).map((c) => c.text ?? JSON.stringify(c)).join("\n");
-		return r.isError ? `error: ${out}` : out;
+		if (r.isError) throw new Error(out);
+		return out;
 	}
 }

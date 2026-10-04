@@ -7,6 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>raubot</title>
+<link rel="stylesheet" href="https://esm.sh/highlight.js@11.11.1/styles/github-dark.min.css">
 <style>
 :root{--bg:#141414;--fg:#e8e8e8;--mute:#8b8b8b;--line:#2c2c2c;--card:#1f1f1f;--chip:#262626;--l:max(18px,env(safe-area-inset-left));--r:max(18px,env(safe-area-inset-right))}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -27,7 +28,7 @@ main{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;o
 .md a{color:#8ab4ff}.md strong{font-weight:600}.md hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 .md code{font:13.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--chip);border-radius:5px;padding:1px 5px}
 .md pre{background:#1b1b1b;border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-x:auto;-webkit-overflow-scrolling:touch}
-.md pre code{background:none;padding:0;white-space:pre}
+.md pre code{background:none!important;padding:0!important;white-space:pre}
 .md blockquote{border-left:3px solid var(--line);padding-left:12px;color:#bdbdbd}
 .md table{display:block;overflow-x:auto;border-collapse:collapse;font-size:14px}.md th,.md td{border:1px solid var(--line);padding:6px 10px;text-align:left}
 details.tool{color:var(--mute);font-size:13px;margin:8px 0}
@@ -54,7 +55,9 @@ button svg{width:18px;height:18px}
 </div></form>
 <script type="module">
 import { marked } from "https://esm.sh/marked@15.0.12";
+import hljs from "https://esm.sh/highlight.js@11.11.1/lib/common";
 marked.setOptions({ gfm: true, breaks: true });
+marked.use({ renderer: { code({ text, lang }) { const l = hljs.getLanguage(lang) ? lang : undefined; const h = l ? hljs.highlight(text, { language: l }) : hljs.highlightAuto(text); return `<pre><code class="hljs">${h.value}</code></pre>`; } } });
 const $ = (id) => document.getElementById(id), main = $("main"), t = $("t"), log = $("log"), partial = $("partial");
 const md = (s) => marked.parse(s ?? "");
 const near = () => main.scrollHeight - main.scrollTop - main.clientHeight < 120;

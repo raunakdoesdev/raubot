@@ -31,10 +31,23 @@ const discard = (memory: WebAssembly.Memory) => ({
 
 const why = (e: string) => { try { const p = JSON.parse(e); return p.stack ?? p.message ?? e; } catch { return e; } };
 
-export async function codemode(source: string, nested: Nested[], store: Store, signal?: AbortSignal) {
+export type App = (path: string[], args: unknown) => Promise<string>;
+
+// Runs in the VM: any unknown member of `tools` becomes a call path, e.g. tools.vercel.listProjects(args) -> app(["vercel", "listProjects"], args).
+const MOUNT = `
+const raw = tools;
+const at = (path) => new Proxy(() => {}, {
+	get: (_, k) => (typeof k === "string" && k !== "then" ? at([...path, k]) : undefined),
+	apply: async (_, __, [args]) => { const t = await raw.__app({ path, args }); try { return JSON.parse(t); } catch { return t; } },
+});
+tools = new Proxy(raw, { get: (o, k) => (typeof k !== "string" || k === "then" || k in o ? o[k] : at([k])) });
+`.replace(/\s*\n\s*/g, " ");
+
+export async function codemode(source: string, nested: Nested[], store: Store, signal?: AbortSignal, app?: App) {
 	const { code, options } = parseCodemodeSource(source);
 	const deadline = Date.now() + Math.min(options.timeoutMs ?? 120_000, 600_000);
 	const byName = new Map(nested.map((t) => [t.name, t]));
+	if (app) byName.set("__app", { name: "__app", description: "", inputSchema: {}, execute: (({ path, args }: { path: string[]; args: unknown }) => app(path, args)) as Nested["execute"] });
 	const output: string[] = [];
 	let finished = false;
 	let done!: (r: { ok: true; value?: string; writes: string } | { ok: false; error: string }) => void;
@@ -64,12 +77,12 @@ export async function codemode(source: string, nested: Nested[], store: Store, s
 			else if (k === "done") done(a.toBoolean() ? { ok: true, value: b === undefined || b.isUndefined ? undefined : b.toString(), writes: c.toString() } : { ok: false, error: b.toString() });
 			return vm.undefined;
 		});
-		const tools = nested.map((t) => ({ name: t.name, jsName: toCodemodeIdentifier(t.name), description: t.description }));
+		const tools = [...byName.values()].map((t) => ({ name: t.name, jsName: toCodemodeIdentifier(t.name), description: t.description }));
 		const saved = Object.fromEntries(Object.entries(store).map(([k, v]) => [k, JSON.stringify(v)]));
 		api = vm.withScope((s) => s.escape(vm.callFunction(vm.evalCode(PRELUDE_SOURCE, "codemode-prelude.js"), vm.undefined, bridge,
 			vm.newString(JSON.stringify(tools)), vm.newString("[]"), vm.newString(JSON.stringify(saved)))));
 		try {
-			const fn = vm.evalCode(`(async (tools, console) => {${code}\n})`, "codemode.js");
+			const fn = vm.evalCode(`(async (tools, console) => {${app ? MOUNT : ""}${code}\n})`, "codemode.js");
 			vm.callFunction(api.getProp("run"), api, fn).dispose();
 			fn.dispose();
 			drain();

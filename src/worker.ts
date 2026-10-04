@@ -18,7 +18,7 @@ import { EXECUTOR, MARKS, MASTER, SELF, VIEW_DOC } from "./prompts.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Box } from "./box.ts";
 export { Box } from "./box.ts";
-import { codemode, describe, type Nested } from "./codemode.ts";
+import { type App, codemode, describe, type Nested } from "./codemode.ts";
 import { Mcp } from "./mcp.ts";
 import { OAuth } from "./oauth.ts";
 import settings from "./settings.html";
@@ -71,19 +71,22 @@ export class Raubot extends DurableObject<Env> {
 		ctx.blockConcurrencyWhile(() => this.#init());
 	}
 
-	/** Executor's MCP tools (skills/execute/resume), passed through as-is; schemas cached so the prompt stays byte-stable. */
-	async #executor(): Promise<Nested[]> {
-		if (!(await this.oauth.connected())) return [];
+	/** Executor: its `skills` and `resume` as plain tools, and every app tool mounted on `tools` (one `execute` per call). Schemas cached so the prompt stays byte-stable. */
+	async #executor(): Promise<{ nested: Nested[]; app?: App }> {
+		if (!(await this.oauth.connected())) return { nested: [] };
 		const mcp = new Mcp(this.env.EXECUTOR_URL, (force) => this.oauth.token(force));
 		let list = await this.ctx.storage.get<Awaited<ReturnType<Mcp["tools"]>>>("executor-tools");
 		if (!list) {
 			try { list = await mcp.tools(); await this.ctx.storage.put("executor-tools", list); }
-			catch (e) { console.error("executor", e); return []; }
+			catch (e) { console.error("executor", e); return { nested: [] }; }
 		}
-		return list.map((t) => ({
-			name: `executor_${t.name}`, description: t.description ?? t.name, inputSchema: t.inputSchema,
+		const nested = list.filter((t) => t.name !== "execute").map((t) => ({
+			name: t.name, description: t.description ?? t.name, inputSchema: t.inputSchema,
 			execute: (args: Record<string, unknown>) => mcp.call(t.name, args),
 		}));
+		const ref = (path: string[]) => path.map((k) => (/^[A-Za-z_$][\w$]*$/.test(k) ? `.${k}` : `[${JSON.stringify(k)}]`)).join("");
+		const app: App = (path, args) => mcp.call("execute", { code: `return await tools${ref(path)}(${JSON.stringify(args ?? {})});` });
+		return { nested, app };
 	}
 
 	async #init() {
@@ -104,40 +107,37 @@ export class Raubot extends DurableObject<Env> {
 
 		const memory = this.memory;
 		const executor = await this.#executor();
-		const direct = [
+		const nested: Nested[] = [
 			{
-				name: "bash", replay: "unsafe" as const,
+				name: "bash",
 				description: "Run a bash command in your Linux box (cwd /workspace). Output is combined stdout+stderr with the exit code. Default timeout 120s, max 900s.",
-				parameters: Type.Object({ cmd: Type.String(), timeout: Type.Optional(Type.Integer()) }),
-				run: ({ cmd, timeout }: { cmd: string; timeout?: number }) => this.env.BOX.getByName("main").bash(cmd, Math.min(timeout ?? 120, 900)),
+				inputSchema: Type.Object({ cmd: Type.String(), timeout: Type.Optional(Type.Integer()) }),
+				execute: ({ cmd, timeout }: { cmd: string; timeout?: number }) => this.env.BOX.getByName("main").bash(cmd, Math.min(timeout ?? 120, 900)),
 			},
 			{
-				name: "zoom", replay: "safe" as const,
+				name: "zoom",
 				description: "Look closer at messages id..id+n-1: n>1 gives the two half summaries, n=1 the full original message.",
-				parameters: Type.Object({ id: Type.Integer(), n: Type.Integer() }),
-				run: async ({ id, n }: { id: number; n: number }) => memory.zoom(id, n),
+				inputSchema: Type.Object({ id: Type.Integer(), n: Type.Integer() }),
+				execute: async ({ id, n }: { id: number; n: number }) => memory.zoom(id, n),
 			},
 			{
-				name: "date", replay: "safe" as const,
+				name: "date",
 				description: "When message id was logged.",
-				parameters: Type.Object({ id: Type.Integer() }),
-				run: async ({ id }: { id: number }) => memory.date(id),
+				inputSchema: Type.Object({ id: Type.Integer() }),
+				execute: async ({ id }: { id: number }) => memory.date(id),
 			},
+			...executor.nested,
 		];
-		const nested: Nested[] = [...direct.map((t) => ({ name: t.name, description: t.description, inputSchema: t.parameters, execute: t.run as Nested["execute"] })), ...executor];
 		const registry = createRegistry();
 		registry.install(defineExtension({
 			name: "raubot",
-			sections: [section("raubot", () => `${MASTER}\n\n${VIEW_DOC}\n\nDefault to codemode for tool use: one script can chain, batch and filter calls to every tool, so prefer it over separate direct calls.\n\n${SELF}${executor.length ? `\n\n${EXECUTOR}` : ""}`, { tag: false })],
-			tools: [...direct.map((t) => defineTool({
-				name: t.name, replay: t.replay, description: t.description, parameters: t.parameters,
-				execute: async (args: never) => ({ content: [{ type: "text", text: await t.run(args) }] }),
-			})), defineTool({
+			sections: [section("raubot", () => `${MASTER}\n\n${VIEW_DOC}\n\n${SELF}${executor.app ? `\n\n${EXECUTOR}` : ""}`, { tag: false })],
+			tools: [defineTool({
 				name: "codemode", replay: "unsafe", description: describe(nested),
 				parameters: Type.Object({ code: Type.String({ description: "Raw JavaScript source." }) }),
 				execute: async ({ code }, _api, ctx) => {
 					const store = (await this.ctx.storage.get<Record<string, unknown>>("codemode-store")) ?? {};
-					const r = await codemode(code, nested, store, (ctx as { signal?: AbortSignal }).signal);
+					const r = await codemode(code, nested, store, (ctx as { signal?: AbortSignal }).signal, executor.app);
 					if (!r.error) await this.ctx.storage.put("codemode-store", store);
 					return { content: [{ type: "text", text: r.text }], isError: r.error };
 				},
