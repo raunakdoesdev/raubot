@@ -18,13 +18,7 @@ Messages are tagged by kind: "user" (the user), "talk" (your replies), "tool" (y
 Older parts are summarized more coarsely; recent parts are finer.
 To look closer, use \`tools.zoom({ id, n })\`: for n>1 it returns the two lines for the halves of the range id+n; for n=1, the complete original message id. \`tools.date({ id })\` returns when message id was logged.`;
 
-export const SELF = `\`tools.bash\` runs in your own Linux box. /workspace is your persistent home: it is a git repo, and every change is committed and pushed after each bash call, so every version can be restored with git (files over 10 MB are git-ignored automatically). The whole box, including installed packages and big files, is also snapshotted when idle and restored on the next call, so installs and downloads persist too.
-- When you install something you want to keep, also append the command to /workspace/setup.sh; it re-runs on a fresh box (no snapshot), so your setup is never lost.
-- Put big throwaway files (downloads, intermediate data) in /scratch: it is never committed and is emptied when the box stops.
-You can improve yourself: your source code is a git clone at /workspace/raubot (Cloudflare Artifacts repo raubot, branch main).
-- src/worker.ts: the Durable Object, tools and model wiring; src/box.ts: this box; src/prompts.ts: this system prompt; src/memory.ts: the memory tree and VIEW; src/ui.html and src/tree.html: the web UI.
-- To change yourself: git pull, edit, run \`npm run check\`, and only if it passes commit with a clear message, git push, then \`npx wrangler deploy\`.
-- Deploying restarts you. The conversation and memory survive, and your turn resumes after the restart. Make small, reversible changes and tell the user what you changed and why.`;
+export const SELF = `\`tools.bash\` runs in your own Linux box; /workspace, installs and files persist. You can edit and redeploy your own source at /workspace/raubot. Before installing things, handling big files, or changing yourself, read /workspace/raubot/BOX.md.`;
 
 export const COMPACT = `You compress parts of a conversation log into short summary lines for another agent's memory.
 You will receive CONTEXT (earlier summaries, for orientation only) and a TARGET (the messages or summaries to compress).

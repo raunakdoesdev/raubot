@@ -21,6 +21,7 @@ git remote set-url origin "$WORKSPACE_REMOTE"
 grep -qx raubot/ .gitignore 2>/dev/null || { printf 'raubot/\nnode_modules/\n' >> .gitignore; git rm -rq --cached --ignore-unmatch raubot; }
 [ -d raubot/.git ] || git clone -q "$RAUBOT_REMOTE" raubot
 git -C raubot remote set-url origin "$RAUBOT_REMOTE"
+git -C raubot pull -q --ff-only 2>/dev/null || true
 (cd raubot && [ -d node_modules ] || npm ci --silent --no-audit --no-fund)
 mkdir -p /scratch
 [ -z "$FRESH" ] || [ ! -f setup.sh ] || bash setup.sh`;
