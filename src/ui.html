@@ -79,7 +79,7 @@ function add(x) {
   }
   open = [];
   const d = document.createElement("div"); d.title = "#" + x.i;
-  if (x.kind === "user") { d.className = "msg user"; d.textContent = x.text; }
+  if (x.kind === "user") { d.className = "msg user"; d.textContent = x.text.replace(/^\[iMessage\] /, ""); }
   else { d.className = "msg talk md"; d.innerHTML = md(x.text); }
   log.append(d);
 }
