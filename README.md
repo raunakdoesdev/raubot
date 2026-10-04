@@ -16,7 +16,7 @@ The design follows Victor Taelin's [OptChat](https://gist.github.com/VictorTaeli
 
 ## Run
 
-No unit tests in this repo: verify changes by running the real thing.
+Don't create tests unless the user asks for them.
 
 ```sh
 npm install
