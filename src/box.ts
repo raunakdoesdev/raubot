@@ -5,6 +5,11 @@ type Env = { ARTIFACTS: Artifacts; CF_DEPLOY_TOKEN: string };
 
 const ACCOUNT = "fadf1a80d9469afc81af5899893cd853";
 
+/** Snapshot the whole box (installs, datasets, caches) when idle for IDLE, and at most every CHECKPOINT while in use. */
+const TICK = 60_000;
+const IDLE = 10 * 60_000;
+const CHECKPOINT = 15 * 60_000;
+
 const clip = (s: string) => (s.length <= CAP ? s : `${s.slice(0, CAP / 2)}\n…[${s.length - CAP} chars cut]…\n${s.slice(-CAP / 2)}`);
 
 /** /workspace is a clone of the Artifacts repo `workspace`, auto-committed and pushed after every command; /workspace/raubot is raubot's own code. */
@@ -13,16 +18,19 @@ git config --global user.name raubot && git config --global user.email raubot@re
 cd /workspace
 [ -d .git ] || { git init -q && git remote add origin "$WORKSPACE_REMOTE" && git fetch -q origin main && git reset -q --hard origin/main && git branch -q -u origin/main; }
 git remote set-url origin "$WORKSPACE_REMOTE"
+grep -qx raubot/ .gitignore 2>/dev/null || { printf 'raubot/\nnode_modules/\n' >> .gitignore; git rm -rq --cached --ignore-unmatch raubot; }
 [ -d raubot/.git ] || git clone -q "$RAUBOT_REMOTE" raubot
 git -C raubot remote set-url origin "$RAUBOT_REMOTE"
 cd raubot && [ -d node_modules ] || npm ci --silent --no-audit --no-fund`;
 
-const SAVE = `git add -A && { git diff --cached --quiet || git commit -qm "$MSG"; } && { git push -q origin HEAD:main 2>&1 || git pull -q --rebase origin main && git push -q origin HEAD:main; }`;
+/** Files over 10 MB are kept out of git (Artifacts caps files at 32 MB); snapshots keep them. */
+const SAVE = `git ls-files -oz --exclude-standard | xargs -0 -r sh -c 'find "$@" -maxdepth 0 -size +10M' _ >> .gitignore; git add -A && { git diff --cached --quiet || git commit -qm "$MSG"; } && { git push -q origin HEAD:main 2>&1 || git pull -q --rebase origin main && git push -q origin HEAD:main; }`;
 
 export class Box extends DurableObject<Env> {
 	#ready?: Promise<void>;
 	#note = "";
 	#env: Record<string, string> = {};
+	#busy = 0;
 
 	async #run(cmd: string, ms: number, env?: Record<string, string>) {
 		const p = await this.ctx.container!.exec(["bash", "-lc", cmd], { cwd: "/workspace", stderr: "combined", signal: AbortSignal.timeout(ms), env: { ...this.#env, ...env } });
@@ -47,19 +55,34 @@ export class Box extends DurableObject<Env> {
 				CLOUDFLARE_API_TOKEN: this.env.CF_DEPLOY_TOKEN,
 				CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
 			});
-			if (!c.running) c.start({ image: c.images.box ?? Object.values(c.images)[0], enableInternet: true, env });
-			for (let i = 0; ; i++) {
-				try { await this.#run("true", 10_000); break; } catch (e) { if (i > 60) throw e; await new Promise((r) => setTimeout(r, 1000)); }
+			const image = c.images.box ?? Object.values(c.images)[0];
+			const snap = await this.ctx.storage.get<{ id: string; image: string }>("snapshot");
+			const restore = !c.running && snap?.image === image;
+			if (!c.running) {
+				c.start({ ...(restore ? { containerSnapshot: { id: snap.id } } : { image }), enableInternet: true, env });
+				await this.ctx.storage.put("saved", Date.now());
 			}
-			await c.setInactivityTimeout(30 * 60_000);
+			for (let i = 0; ; i++) {
+				try { await this.#run("true", 10_000); break; } catch (e) {
+					if (i > 60) {
+						if (restore) await this.ctx.storage.delete("snapshot");
+						throw e;
+					}
+					await new Promise((r) => setTimeout(r, 1000));
+				}
+			}
+			await c.setInactivityTimeout(5 * TICK);
+			if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + TICK);
 			const r = await this.#run(SETUP, 300_000);
 			this.#note = r.exitCode ? `[box setup failed]\n${r.out}\n` : "";
 		})().catch((e) => { this.#ready = undefined; throw e; }));
 	}
 
 	async bash(cmd: string, seconds = 120) {
+		this.#busy++;
 		try {
 			await this.#boot();
+			await this.ctx.storage.put("last", Date.now());
 			const { out, exitCode } = await this.#run(cmd, seconds * 1000);
 			const save = await this.#run(SAVE, 60_000, { MSG: cmd.split("\n")[0].slice(0, 72) });
 			const note = this.#note + (save.exitCode ? `\n[autosave failed]\n${save.out}` : "");
@@ -67,6 +90,28 @@ export class Box extends DurableObject<Env> {
 			return clip(`${note}${out}\n[exit ${exitCode}]`);
 		} catch (e) {
 			return clip(`error: ${e instanceof Error ? e.message : String(e)}`);
+		} finally {
+			this.#busy--;
+			await this.ctx.storage.put("last", Date.now());
 		}
+	}
+
+	async alarm() {
+		const c = this.ctx.container!;
+		if (!c.running) return;
+		const now = Date.now();
+		const last = (await this.ctx.storage.get<number>("last")) ?? 0;
+		const saved = (await this.ctx.storage.get<number>("saved")) ?? 0;
+		const idle = !this.#busy && now - last > IDLE;
+		if (idle || (!this.#busy && last > saved && now - saved > CHECKPOINT)) {
+			const { id } = await c.snapshotContainer({ name: "box" });
+			await this.ctx.storage.put({ snapshot: { id, image: c.images.box ?? Object.values(c.images)[0] }, saved: now });
+		}
+		if (idle && !this.#busy && (await this.ctx.storage.get<number>("last")) === last) {
+			this.#ready = undefined;
+			return c.destroy("idle");
+		}
+		await c.setInactivityTimeout(5 * TICK);
+		await this.ctx.storage.setAlarm(Date.now() + TICK);
 	}
 }
