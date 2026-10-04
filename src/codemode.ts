@@ -11,7 +11,7 @@ type Store = Record<string, unknown>;
 
 export const describe = (tools: Nested[]) => `Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level \`await\` and \`return\` work. No Node, file system, network, or timers.
 - \`await tools.<name>({ ...args })\` resolves to the tool's text output and rejects with an Error on failure.
-- \`text(value)\`, \`console.log(...)\` and \`return\` add output; \`exit()\` ends the script. \`store(key, value)\` / \`load(key)\` keep JSON values across calls.
+- \`text(value)\`, \`console.log(...)\` and \`return\` add output; \`exit()\` ends the script. \`store(key, value)\` / \`load(key)\` keep JSON values across calls. They are for small state (256 KB in all): write big data such as API dumps to files in /scratch with \`tools.bash\` instead.
 - Use it to batch independent calls (Promise.allSettled), chain them, or filter large output, instead of many separate tool calls.
 - Optional first line: \`// @options: {"timeout_ms": 60000}\`
 
