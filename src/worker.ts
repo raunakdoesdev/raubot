@@ -85,7 +85,15 @@ export class Raubot extends DurableObject<Env> {
 			execute: (args: Record<string, unknown>) => mcp.call(t.name, args),
 		}));
 		const ref = (path: string[]) => path.map((k) => (/^[A-Za-z_$][\w$]*$/.test(k) ? `.${k}` : `[${JSON.stringify(k)}]`)).join("");
-		const app: App = (path, args) => mcp.call("execute", { code: `return await tools${ref(path)}(${JSON.stringify(args ?? {})});` });
+		const app: App = async (path, args) => {
+			const out = await mcp.call("execute", { code: `return await tools${ref(path)}(${JSON.stringify(args ?? {})});` });
+			const r = JSON.parse(out);
+			if (r.status !== "completed") return out; // paused for approval: the agent shows it and resumes
+			const v = r.execution?.value;
+			if (!r.execution?.ok || v?.isError) throw new Error(JSON.stringify(r.execution?.error ?? v));
+			const res = v?.structuredContent?.result ?? v?.structuredContent ?? v?.content?.map((c: { text?: string }) => c.text).join("\n") ?? v;
+			return typeof res === "string" ? res : JSON.stringify(res);
+		};
 		return { nested, app };
 	}
 

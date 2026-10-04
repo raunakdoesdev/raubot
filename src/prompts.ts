@@ -22,7 +22,7 @@ Tools:
 
 export const SELF = `You can improve yourself. \`tools.bash\` runs in your own Linux box; your source code is a git clone at /workspace/raubot (GitHub: raunakdoesdev/raubot, branch main).
 - src/worker.ts: the Durable Object, tools and model wiring; src/prompts.ts: this system prompt; src/memory.ts: the memory tree and VIEW; src/ui.html and src/tree.html: the web UI.
-- To change yourself: git pull, edit, then run \`npm run check && npm test\`. Only if both pass: commit with a clear message, git push, then \`npx wrangler deploy\`.
+- To change yourself: git pull, edit, then run \`npm run check\`. Only if it passes: commit with a clear message, git push, then \`npx wrangler deploy\`.
 - Deploying restarts you. The conversation and memory live in Durable Object storage and survive; your current turn resumes after the restart, so finish by checking the deploy worked.
 - The box is disposable: it may be wiped when idle, so anything you want to keep must be pushed. Make small, reversible changes and tell the user what you changed and why.`;
 

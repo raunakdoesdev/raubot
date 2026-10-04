@@ -16,10 +16,11 @@ The design follows Victor Taelin's [OptChat](https://gist.github.com/VictorTaeli
 
 ## Run
 
+No unit tests in this repo: verify changes by running the real thing.
+
 ```sh
 npm install
 echo "OPENAI_API_KEY=sk-..." > .dev.vars
 npm run dev       # http://localhost:8787
-npm test
 npm run deploy    # raubot.reducto.ai, behind Cloudflare Access
 ```
