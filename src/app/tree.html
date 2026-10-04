@@ -8,13 +8,13 @@
 html{background:#141414;-webkit-text-size-adjust:100%}
 body{margin:0;font:14px/1.45 ui-sans-serif,system-ui,-apple-system;color:#e8e8e8;padding:0 max(14px,env(safe-area-inset-left)) 60px}
 a{color:inherit}
-header{position:sticky;top:0;z-index:2;background:#141414;padding:10px 0 8px;border-bottom:1px solid #2a2a2a}
+header{background:#141414;padding:10px 0 8px;border-bottom:1px solid #2a2a2a}
 .top{display:flex;gap:10px;align-items:center;color:#8b8b8b}.top b{color:#e8e8e8}.top .sp{flex:1}
 .meter{margin:8px 0 4px;height:6px;background:#262626;border-radius:3px;overflow:hidden}.meter i{display:block;height:100%;background:#7aa2f7}
 .sub{font-size:12px;color:#8b8b8b}
 .map{display:flex;height:16px;margin:8px 0 2px;border-radius:3px;overflow:hidden;gap:1px;cursor:pointer}
 .map span{min-width:1px}
-.tabs{display:flex;gap:4px;margin-top:8px}
+.tabs{position:sticky;top:0;z-index:2;background:#141414;display:flex;gap:4px;padding:8px 0 6px;border-bottom:1px solid #2a2a2a}
 .tabs button{background:none;border:0;color:#8b8b8b;font:inherit;padding:4px 10px;border-radius:6px;cursor:pointer}
 .tabs button.on{background:#262626;color:#e8e8e8}
 input{width:100%;background:#1c1c1c;border:1px solid #2c2c2c;border-radius:8px;color:#e8e8e8;font:inherit;padding:7px 10px;margin:10px 0 4px}
@@ -27,7 +27,7 @@ input{width:100%;background:#1c1c1c;border:1px solid #2c2c2c;border-radius:8px;c
 .txt{grid-column:3;overflow-wrap:anywhere}.pend{color:#d9a441;font-style:italic}
 .kids{margin-left:14px;border-left:1px solid #2a2a2a;padding-left:4px}
 .raw{white-space:pre-wrap;font:12px/1.45 ui-monospace,monospace;background:#1b1b1b;border-radius:6px;padding:8px 10px;margin:2px 0 6px 26px;overflow-x:auto;max-height:60vh;overflow-y:auto}
-.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:#777;margin:6px 0}.legend b{font-weight:400}
+.legend{display:flex;gap:4px 12px;flex-wrap:wrap;font-size:11px;color:#777;margin:6px 0}.legend b{font-weight:400}.legend .v{color:#7aa2f7}.legend .f{color:#666}
 .hit{padding:6px;border-radius:6px;cursor:pointer}.hit:hover{background:#1c1c1c}.hit .meta{white-space:normal}
 table{border-collapse:collapse;font:12px ui-monospace,monospace;width:100%;margin-top:10px}
 td,th{padding:4px 6px;text-align:right;border-bottom:1px solid #242424}th{color:#8b8b8b;font-weight:500}
@@ -38,8 +38,8 @@ td,th{padding:4px 6px;text-align:right;border-bottom:1px solid #242424}th{color:
 	<div class="meter" title="view size vs budget"><i id="fill"></i></div>
 	<div class="sub" id="budget"></div>
 	<div class="map" id="map" title="what the model sees, oldest → newest; tap to jump"></div>
-	<div class="tabs"><button data-t="tree" class="on">Tree</button><button data-t="view">Model's view</button><button data-t="cache">Cache</button></div>
-</header>
+	</header>
+<div class="tabs"><button data-t="tree" class="on">Tree</button><button data-t="view">Model's view</button><button data-t="cache">Cache</button></div>
 <main>
 	<section id="tree">
 		<input id="q" placeholder="Search messages…" autocomplete="off">
@@ -66,7 +66,7 @@ function row(p) {
 	const lv = el("span", "lv", p.l ? `L${p.l}` : p.kind); lv.style.background = p.l ? hue(p.l) : KIND[p.kind] || "#888"; r.append(lv);
 	const meta = el("span", "meta", p.l ? `#${p.id}–${p.id + p.n - 1} · ${p.n} msgs · ${span(p)} ` : `#${p.id} · ${span(p)} `);
 	if (p.seen !== "open") meta.append(el("span", p.seen === "view" ? "v" : "f", p.seen === "view" ? "● in view" : "● folded"));
-	r.append(meta, el("span"), el("span", "txt" + (p.text == null ? " pend" : ""), p.text ?? "summarizing…"));
+	r.append(meta, el("span"), el("span", "txt" + (p.text == null ? " pend" : ""), p.text == null ? "summarizing…" : p.l ? p.text : p.text.replace(/^\w+: /, "")));
 	wrap.append(r);
 	nodes.set(`${p.l}:${p.i}`, wrap);
 	let kids = null;
