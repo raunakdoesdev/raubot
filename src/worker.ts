@@ -65,6 +65,7 @@ export class Raubot extends DurableObject<Env> {
 	#lock: Promise<unknown> = Promise.resolve();
 	#partial = "";
 	#marks = 0;
+	#prompt = "";
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -136,10 +137,12 @@ export class Raubot extends DurableObject<Env> {
 			},
 			...executor.nested,
 		];
+		const system = `${MASTER}\n\n${VIEW_DOC}\n\n${SELF}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
+		this.#prompt = `# System prompt\n\n${system}\n\n# codemode tool description\n\n${describe(nested)}\n`;
 		const registry = createRegistry();
 		registry.install(defineExtension({
 			name: "raubot",
-			sections: [section("raubot", () => `${MASTER}\n\n${VIEW_DOC}\n\n${SELF}${executor.app ? `\n\n${EXECUTOR}` : ""}`, { tag: false })],
+			sections: [section("raubot", () => system, { tag: false })],
 			tools: [defineTool({
 				name: "codemode", replay: "unsafe", description: describe(nested),
 				parameters: Type.Object({ code: Type.String({ description: "Raw JavaScript source." }) }),
@@ -307,6 +310,7 @@ export class Raubot extends DurableObject<Env> {
 			setTimeout(() => this.ctx.abort("executor connected"), 100);
 			return Response.redirect(`${url.origin}/`, 302);
 		}
+		if (url.pathname === "/prompt") return new Response(this.#prompt, { headers: { "content-type": "text/plain; charset=utf-8" } });
 		if (url.pathname === "/tree") return new Response(tree, { headers: { "content-type": "text/html; charset=utf-8" } });
 		if (url.pathname === "/tree.json") return Response.json(this.#tree(url.searchParams));
 		return new Response("not found", { status: 404 });

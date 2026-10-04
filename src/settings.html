@@ -8,6 +8,7 @@ a{color:inherit}h1{font-size:15px;margin:0 0 20px}.row{display:flex;align-items:
 <h1><a href="/">raubot</a> · settings</h1>
 <div class="row"><span>Executor<small id="ex">…</small></span><a class="btn" id="exb" href="/oauth/start">Connect</a></div>
 <div class="row"><span>Memory tree<small>what the model sees, and cache stats</small></span><a class="btn" href="/tree">Open</a></div>
+<div class="row"><span>Prompt<small>system prompt and codemode tool description</small></span><a class="btn" href="/prompt">Open</a></div>
 <script>
 fetch("/settings.json").then(r=>r.json()).then(s=>{
 	ex.textContent=s.executor?`connected · ${s.tools} tools`:"not connected";
