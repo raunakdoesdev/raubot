@@ -5,8 +5,12 @@ import { imessage } from "./imessage.ts";
 /** Where a message came from, and so where its turn's reply goes. */
 export type Origin = { channel: string; to: string };
 export const APP: Origin = { channel: "app", to: "" };
-/** `id` is the channel's own message id, for receipts and reactions. */
-export type Inbound = { from: Origin; id: string; text: string };
+/** `id` is the channel's own message id, for receipts and reactions. `files` saves the message's attachments into `dir` in the box and gives their paths. */
+export type Inbound = { from: Origin; id: string; text: string; files?: (dir: string) => Effect.Effect<string[], ChannelError, Box> };
+
+/** Where uploads land in the box, relative to /workspace: one folder per day. */
+export const uploads = () => `uploads/${new Date().toISOString().slice(0, 10)}`;
+export const uploadName = (name: string) => `${Date.now().toString(36)}-${name.replace(/[^\w.-]+/g, "_").slice(-80)}`;
 
 export class ChannelError extends Data.TaggedError("ChannelError")<{ message: string; status: number }> {}
 
@@ -59,7 +63,7 @@ const pickReaction = (ai: Ai, text: string) => Effect.tryPromise(() => ai.run("@
 export const acknowledge = (c: Channel, m: Inbound, ai: Ai) => Effect.all([
 	c.read?.(m) ?? Effect.void,
 	c.typing?.(m.from.to, true) ?? Effect.void,
-	c.react ? pickReaction(ai, m.text).pipe(Effect.flatMap((e) => (e ? c.react!(m, e) : Effect.void))) : Effect.void,
+	c.react && m.text ? pickReaction(ai, m.text).pipe(Effect.flatMap((e) => (e ? c.react!(m, e) : Effect.void))) : Effect.void,
 ], { concurrency: "unbounded", mode: "either" }).pipe(Effect.tap((rs) => Effect.forEach(rs, (r) => (r._tag === "Left" ? Effect.logWarning(`${c.name} presence`, r.left) : Effect.void))), Effect.asVoid);
 
 /** A turn that ended without a reply still clears the typing indicator. */

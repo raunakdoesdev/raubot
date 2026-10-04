@@ -24,9 +24,9 @@ import { Mcp } from "./mcp.ts";
 import { serve } from "../app/index.ts";
 import type { Core, CoreEvent } from "./api.ts";
 import { agent, type AgentHost } from "./agents.ts";
-import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, acknowledge, idle, send as deliver, tag } from "./channels/index.ts";
+import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, acknowledge, idle, send as deliver, tag, uploadName, uploads } from "./channels/index.ts";
 import * as frozen from "./freezer.ts";
-import { bash, Box, BoxLive, runner, Storage } from "./fx.ts";
+import { bash, Box, BoxLive, runner, Storage, write } from "./fx.ts";
 import { JobHost, Jobs, JobsLive } from "./jobs.ts";
 import { OAuth } from "./oauth.ts";
 
@@ -407,8 +407,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	busy() { return (this.state.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; }
 
 	/** Every message comes from a channel; non-app ones are tagged for the model and get the turn's reply. */
-	async send(input: string, from: Origin = APP) {
-		input = tag(from, input);
+	async send(input: string, from: Origin = APP, files: string[] = []) {
+		input = tag(from, [input, ...files.map((f) => `[attached: ${f}]`)].filter(Boolean).join("\n"));
 		if (from.channel !== APP.channel) {
 			await this.ctx.storage.put("reply", { ...from, start: this.memory.log.length });
 		}
@@ -421,6 +421,13 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			await this.root.submit({ type: "input", content: input }, C);
 		});
 		await this.#sync();
+	}
+
+	/** Saves a file into the box's uploads folder and gives its path, for `send`'s `files`. */
+	async upload(name: string, bytes: Uint8Array) {
+		const path = `${uploads()}/${uploadName(name)}`;
+		await this.#fx(write(path, bytes));
+		return path;
 	}
 
 	#changed() {
@@ -479,7 +486,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			return this.#fx(channel.receive(req).pipe(
 				Effect.tap((msgs) => Effect.forEach(msgs, (m) => Effect.sync(() => {
 					this.ctx.waitUntil(this.#fx(acknowledge(channel, m, this.env.AI)));
-					void this.send(m.text, m.from).catch((e) => console.error(channel.name, e));
+					const files = m.files?.(uploads()).pipe(Effect.tapError((e) => Effect.logWarning(`${channel.name} attachments`, e)), Effect.orElseSucceed(() => [])) ?? Effect.succeed([]);
+					void this.#fx(files).then((fs) => this.send(m.text, m.from, fs)).catch((e) => console.error(channel.name, e));
 				}))),
 				Effect.as(new Response("ok")),
 				Effect.catchTag("ChannelError", (e) => Effect.succeed(new Response(e.message, { status: e.status }))),

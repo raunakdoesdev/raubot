@@ -6,7 +6,10 @@ export type CoreEvent = { history?: Msg[]; partial?: string; status?: string; lo
 
 /** raubot's core as clients (the web app) see it. */
 export interface Core {
-	send(text: string, from?: Origin): Promise<void>;
+	/** `files` are box paths from `upload`. */
+	send(text: string, from?: Origin, files?: string[]): Promise<void>;
+	/** Save a file into the box; gives its path. */
+	upload(name: string, bytes: Uint8Array): Promise<string>;
 	/** Stop the current turn. */
 	stop(): Promise<void>;
 	snapshot(): { history: Msg[]; busy: boolean; pending: boolean };

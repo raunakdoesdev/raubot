@@ -105,6 +105,15 @@ export class Computer extends DurableObject<Env> {
 		}
 	}
 
+	/** Writes a file into the box; `path` is relative to /workspace. */
+	async write(path: string, bytes: Uint8Array) {
+		await this.#boot();
+		await this.ctx.storage.put("last", Date.now());
+		const p = await this.ctx.container!.exec(["bash", "-c", 'mkdir -p "$(dirname "$F")" && cat > "$F"'], { cwd: "/workspace", stdin: new Blob([bytes]).stream(), stderr: "combined", env: { ...this.#env, F: path }, signal: AbortSignal.timeout(120_000) });
+		const { stdout, exitCode } = await p.output();
+		if (exitCode) throw new Error(`write ${path}: ${new TextDecoder().decode(stdout)}`);
+	}
+
 	async #snapshot() {
 		const c = this.ctx.container!;
 		const saved = Date.now();

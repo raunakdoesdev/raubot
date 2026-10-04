@@ -1,8 +1,9 @@
 // One iMessage action via Spectrum (gRPC, so it runs in the box, not the Worker).
-// OP=send TEXT_B64 | OP=read MSG | OP=typing ON=1|0 | OP=react MSG EMOJI
+// OP=send TEXT_B64 | OP=read MSG | OP=typing ON=1|0 | OP=react MSG EMOJI | OP=download MSG DIR (prints FILES [paths])
+import { mkdir, writeFile } from "node:fs/promises";
 import { Spectrum } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
-const { SPECTRUM_PROJECT_ID: projectId, SPECTRUM_PROJECT_SECRET: projectSecret, OP, SPACE, MSG, TEXT_B64, ON, EMOJI } = process.env;
+const { SPECTRUM_PROJECT_ID: projectId, SPECTRUM_PROJECT_SECRET: projectSecret, OP, SPACE, MSG, TEXT_B64, ON, EMOJI, DIR } = process.env;
 const app = await Spectrum({ projectId, projectSecret, providers: [imessage.config()] });
 const space = await imessage(app).space.get(SPACE);
 const message = async () => (await space.getMessage(MSG)) ?? Promise.reject(new Error(`no message ${MSG}`));
@@ -10,5 +11,17 @@ if (OP === "send") await space.send(Buffer.from(TEXT_B64, "base64").toString("ut
 else if (OP === "read") await (await message()).read();
 else if (OP === "typing") await (ON === "1" ? space.startTyping() : space.stopTyping());
 else if (OP === "react") await (await message()).react(EMOJI);
+else if (OP === "download") {
+  const { content } = await message();
+  const parts = content.type === "group" ? content.items.map((i) => i.content) : [content];
+  await mkdir(`/workspace/${DIR}`, { recursive: true });
+  const files = [];
+  for (const a of parts.filter((p) => p.type === "attachment")) {
+    const f = `${DIR}/${Date.now().toString(36)}-${a.name.replace(/[^\w.-]+/g, "_").slice(-80)}`;
+    await writeFile(`/workspace/${f}`, await a.read());
+    files.push(f);
+  }
+  console.log(`FILES ${JSON.stringify(files)}`);
+}
 else throw new Error(`unknown OP ${OP}`);
 process.exit(0);

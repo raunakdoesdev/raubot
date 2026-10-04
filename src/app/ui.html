@@ -45,13 +45,17 @@ textarea::placeholder{color:#6f6f6f}
 button{flex:none;width:36px;height:36px;border:0;border-radius:50%;display:grid;place-items:center;padding:0;cursor:pointer}
 #send{background:var(--fg);color:#111}#send:disabled{background:#3a3a3a;color:#777}
 #stop{background:#3a3a3a;color:var(--fg);display:none}
+#clip{background:transparent;color:#9a9a9a;margin-right:auto}
+#files{display:flex;flex-wrap:wrap;gap:6px}#files:empty{display:none}
+#files span{font-size:13px;background:#2a2a2a;border-radius:8px;padding:3px 8px;color:#bbb}
 button svg{width:18px;height:18px}
 </style>
 <header><b>raubot</b><span id="status"></span><a href="/settings" aria-label="settings">⚙︎</a></header>
 <main id="main"><div id="log"></div><div id="partial" class="md"></div></main>
 <form id="f"><div class="box">
+<div id="files"></div><input type="file" id="pick" multiple hidden>
 <textarea id="t" rows="1" placeholder="Message raubot" enterkeyhint="send" autocomplete="off"></textarea>
-<div class="bar"><button type="button" id="stop" aria-label="stop"><svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></svg></button><button id="send" aria-label="send" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div>
+<div class="bar"><button type="button" id="clip" aria-label="attach"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5l-8.6 8.6a5 5 0 01-7.1-7.1l8.6-8.6a3.3 3.3 0 014.7 4.7l-8.6 8.6a1.7 1.7 0 01-2.4-2.4l7.9-7.9"/></svg></button><button type="button" id="stop" aria-label="stop"><svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></svg></button><button id="send" aria-label="send" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div>
 </div></form>
 <script type="module">
 import { marked } from "https://esm.sh/marked@15.0.12";
@@ -105,8 +109,20 @@ function connect() {
   ws.onclose = () => setTimeout(() => { log.innerHTML = ""; connect(); }, 1000);
 }
 connect();
-const fit = () => { t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; $("send").disabled = !t.value.trim(); };
-const send = () => { const v = t.value.trim(); if (!v) return; ws.send(JSON.stringify({ send: v })); t.value = ""; fit(); down(true); };
+let files = [], uploading = 0;
+const chips = () => { $("files").innerHTML = ""; for (const f of files) { const s = document.createElement("span"); s.textContent = f.split("/").pop().replace(/^[a-z0-9]+-/, ""); $("files").append(s); } if (uploading) $("files").append(Object.assign(document.createElement("span"), { textContent: `uploading ${uploading}…` })); fit(); };
+const fit = () => { t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; $("send").disabled = uploading > 0 || (!t.value.trim() && !files.length); };
+const send = () => { const v = t.value.trim(); if (uploading || (!v && !files.length)) return; ws.send(JSON.stringify({ send: v, files })); t.value = ""; files = []; chips(); down(true); };
+$("clip").onclick = () => $("pick").click();
+$("pick").onchange = async () => {
+  const picked = [...$("pick").files]; $("pick").value = ""; uploading += picked.length; chips();
+  await Promise.all(picked.map(async (f) => {
+    const fd = new FormData(); fd.append("file", f);
+    const r = await fetch("/upload", { method: "POST", body: fd });
+    if (r.ok) files.push((await r.json()).path); else $("status").textContent = `upload failed: ${await r.text()}`;
+    uploading--; chips();
+  }));
+};
 t.oninput = fit;
 t.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer:coarse)").matches) { e.preventDefault(); send(); } };
 $("f").onsubmit = (e) => { e.preventDefault(); send(); };

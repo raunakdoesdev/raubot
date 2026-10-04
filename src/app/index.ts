@@ -25,8 +25,8 @@ const socket = (core: Core) => {
 	out(core.snapshot());
 	const off = core.subscribe(out);
 	server.addEventListener("message", (ev) => {
-		const m = JSON.parse(String(ev.data)) as { send?: string; stop?: true };
-		if (m.send) core.send(m.send).catch((e) => out({ error: String(e) }));
+		const m = JSON.parse(String(ev.data)) as { send?: string; files?: string[]; stop?: true };
+		if (m.send || m.files?.length) core.send(m.send ?? "", undefined, m.files).catch((e) => out({ error: String(e) }));
 		if (m.stop) void core.stop();
 	});
 	server.addEventListener("close", off);
@@ -43,6 +43,12 @@ export const serve = async (core: Core, req: Request): Promise<Response> => {
 		case "/tree": return html(tree);
 		case "/tree.json": return Response.json(core.tree(url.searchParams));
 		case "/prompt": return new Response(core.prompt(), { headers: { "content-type": "text/plain; charset=utf-8" } });
+		case "/upload": {
+			if (req.method !== "POST") break;
+			const f = (await req.formData()).get("file");
+			if (!(f instanceof File)) return new Response("no file", { status: 400 });
+			return Response.json({ path: await core.upload(f.name, new Uint8Array(await f.arrayBuffer())) });
+		}
 		case "/reset":
 			if (req.method !== "POST") break;
 			await core.reset();
