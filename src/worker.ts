@@ -258,7 +258,7 @@ export class Raubot extends DurableObject<Env> {
 	/** An inbound iMessage joins the same conversation; the final reply is texted back from the box. */
 	async #imessage(space: string, text: string) {
 		const start = this.memory.log.length;
-		await this.send(`[iMessage] ${text}`);
+		await this.send(text);
 		await this.root.waitForIdle(C);
 		await this.#sync();
 		const reply = this.memory.log.slice(start).filter((m) => m.kind === "talk").at(-1)?.text;
