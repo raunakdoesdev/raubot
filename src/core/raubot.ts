@@ -53,6 +53,8 @@ type Block = { cache_control?: unknown };
 type AnthropicPayload = { system?: Block[] | string; tools?: Block[]; messages?: { role: string; content: Block[] | string }[] };
 
 /** Anthropic allows 4 breakpoints: the view's marks plus pi's request-end mark. System and tools sit inside the first view mark's prefix. */
+const WEB_SEARCH = { type: "openrouter:web_search", parameters: { max_results: 5 } } as unknown as Block;
+
 const markView = (marks: number) => (payload: unknown) => {
 	const p = payload as AnthropicPayload;
 	const first = p.messages?.find((m) => m.role === "user");
@@ -61,6 +63,9 @@ const markView = (marks: number) => (payload: unknown) => {
 	for (const b of first.content.slice(0, marks)) b.cache_control = { type: "ephemeral" };
 	return p;
 };
+
+/** OpenRouter runs web search server-side; the model calls it like any tool. */
+const withSearch = (provider: string, p: AnthropicPayload) => (provider === "openrouter" ? { ...p, tools: [...(p.tools ?? []), WEB_SEARCH] } : p);
 
 export class Raubot extends DurableObject<Env> implements Core {
 	memory!: Memory;
@@ -132,7 +137,7 @@ export class Raubot extends DurableObject<Env> implements Core {
 		models.setProvider(openrouterProvider());
 		const stream = models.streamSimple.bind(models);
 		models.streamSimple = (model, context, options) =>
-			stream(model, context, model.api === "anthropic-messages" ? { ...options, onPayload: markView(this.#marks) } : options);
+			stream(model, context, model.api === "anthropic-messages" ? { ...options, onPayload: (p: unknown) => withSearch(model.provider, markView(this.#marks)(p) ?? (p as AnthropicPayload)) } : options);
 		const compactor = models.getModel("openrouter", this.env.COMPACT_MODEL)!;
 		this.memory = new Memory(this.ctx.storage.sql, async (systemPrompt, prompt) => {
 			const r = await models.completeSimple(compactor, { systemPrompt, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, { reasoning: "low" });
