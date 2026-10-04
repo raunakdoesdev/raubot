@@ -28,4 +28,5 @@ npm install
 echo "OPENAI_API_KEY=sk-..." > .dev.vars
 npm run dev       # http://localhost:8787
 npm run deploy    # raubot.reducto.ai, behind Cloudflare Access
+npm run deploy:staging    # raubot-staging.reducto.ai: separate chat, box and Artifacts namespace `raubot-staging`; test here, not on the main instance
 ```

@@ -12,5 +12,17 @@
 	"containers": [
 		{ "name": "raubot-computer", "class_name": "Computer", "scheduling_policy": "durable_object", "images": { "box": { "image": "registry.cloudflare.com/fadf1a80d9469afc81af5899893cd853/raubot-box@sha256:0d6d2719e889fffba49c110047f94611a89865cf5aff6f150877d04c7e578b4e" } } }
 	],
-	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Raubot"] }, { "tag": "v2", "new_sqlite_classes": ["Box"] }, { "tag": "v3", "new_sqlite_classes": ["Computer"] }, { "tag": "v4", "deleted_classes": ["Box"] }]
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Raubot"] }, { "tag": "v2", "new_sqlite_classes": ["Box"] }, { "tag": "v3", "new_sqlite_classes": ["Computer"] }, { "tag": "v4", "deleted_classes": ["Box"] }],
+	"env": {
+		"staging": {
+			"routes": [{ "pattern": "raubot-staging.reducto.ai", "custom_domain": true }],
+			"vars": { "PROVIDER": "openrouter",
+				"MODEL": "anthropic/claude-opus-5.5", "COMPACT_MODEL": "z-ai/glm-5.3-flash", "EXECUTOR_URL": "https://v2.executor.sh/mcp" },
+			"artifacts": [{ "binding": "ARTIFACTS", "namespace": "raubot-staging" }],
+			"durable_objects": { "bindings": [{ "name": "RAUBOT", "class_name": "Raubot" }, { "name": "BOX", "class_name": "Computer" }] },
+			"containers": [
+				{ "name": "raubot-staging-computer", "class_name": "Computer", "scheduling_policy": "durable_object", "images": { "box": { "image": "registry.cloudflare.com/fadf1a80d9469afc81af5899893cd853/raubot-box@sha256:0d6d2719e889fffba49c110047f94611a89865cf5aff6f150877d04c7e578b4e" } } }
+			]
+		}
+	}
 }

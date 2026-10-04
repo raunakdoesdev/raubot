@@ -64,6 +64,7 @@ export class Raubot extends DurableObject<Env> {
 	sockets = new Set<WebSocket>();
 	#lock: Promise<unknown> = Promise.resolve();
 	#partial = "";
+	#texting = false;
 	#marks = 0;
 	#prompt = "";
 
@@ -178,6 +179,7 @@ export class Raubot extends DurableObject<Env> {
 			const partial = msg ? text(msg.content) : "";
 			if (partial !== this.#partial) this.#broadcast({ partial: (this.#partial = partial) });
 			await this.#sync();
+			void this.#textBack().catch((e) => console.error("imessage", e));
 		});
 		this.harness.resume();
 		await this.#sync();
@@ -255,16 +257,23 @@ export class Raubot extends DurableObject<Env> {
 		return sig === `v0=${[...mac].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
 	}
 
-	/** An inbound iMessage joins the same conversation; the final reply is texted back from the box. */
+	/** An inbound iMessage joins the same conversation; once the turn ends, its final reply is texted back from the box. */
 	async #imessage(space: string, text: string) {
-		const start = this.memory.log.length;
-		await this.send(`[iMessage] ${text}`);
-		await this.root.waitForIdle(C);
-		await this.#sync();
-		const reply = this.memory.log.slice(start).filter((m) => m.kind === "talk").at(-1)?.text;
-		if (!reply) return;
-		const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(reply)));
-		await this.env.BOX.getByName("main").bash(`# imessage reply\ngit -C raubot fetch -q && git -C raubot checkout -q origin/main -- imessage && cd raubot/imessage && { [ -d node_modules ] || npm i -s; } && SPACE='${space.replace(/'/g, "")}' TEXT_B64=${b64} node send.mjs`, 120);
+		await this.ctx.storage.put("imsg-reply", { space, start: this.memory.log.length });
+		this.send(`[iMessage] ${text}`).catch((e) => console.error("imessage", e));
+	}
+
+	async #textBack() {
+		const r = await this.ctx.storage.get<{ space: string; start: number }>("imsg-reply");
+		const reply = r && !this.busy() && this.memory.log.slice(r.start).filter((m) => m.kind === "talk").at(-1)?.text;
+		if (!reply || this.#texting) return;
+		this.#texting = true;
+		try {
+			await this.ctx.storage.delete("imsg-reply");
+			const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(reply)));
+			const out = await this.env.BOX.getByName("main").bash(`# imessage reply\ngit -C raubot fetch -q && git -C raubot checkout -q origin/main -- imessage && cd raubot/imessage && { [ -d node_modules ] || npm i -s; } && SPACE='${r.space.replace(/'/g, "")}' TEXT_B64=${b64} node send.mjs`, 120);
+			console.log("imessage reply", out);
+		} finally { this.#texting = false; }
 	}
 
 	busy() { return (this.state.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; }
@@ -323,7 +332,7 @@ export class Raubot extends DurableObject<Env> {
 			const { message: m } = JSON.parse(body) as { message: { id: string; space: { id: string }; content: { type: string; text?: string } } };
 			if (m.content.type === "text" && m.content.text && !(await this.ctx.storage.get(`imsg:${m.id}`))) {
 				await this.ctx.storage.put(`imsg:${m.id}`, 1);
-				this.#imessage(m.space.id, m.content.text).catch((e) => console.error("imessage", e));
+				await this.#imessage(m.space.id, m.content.text);
 			}
 			return new Response("ok");
 		}
