@@ -10,15 +10,17 @@ import {
 	type Conversation, type ConversationView, createRegistry, defineExtension, defineTool, GenerationTask, Harness,
 	hook, section,
 } from "@earendil-works/pi-durable";
-import type { EntryId } from "@earendil-works/pi-durable";
+import { configure, type EntryId, type ToolExecutionApi } from "@earendil-works/pi-durable";
+import type { Context } from "@earendil-works/chord";
+import Value from "typebox/value";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
-import { EXECUTOR, MARKS, MASTER, SELF, VIEW_DOC } from "./prompts.ts";
+import { EXECUTOR, MARKS, MASTER, SELF, SUBAGENT, VIEW_DOC } from "./prompts.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Computer } from "./box.ts";
 export { Computer } from "./box.ts";
-import { type App, codemode, describe, type Nested } from "./codemode.ts";
+import { type App, codemode, describe, type Freezer, type Frozen, type Nested } from "./codemode.ts";
 import { Mcp } from "./mcp.ts";
 import { OAuth } from "./oauth.ts";
 import settings from "./settings.html";
@@ -156,18 +158,30 @@ Example: find the Slack messages that need the user's attention.
 			},
 			...executor.nested,
 		];
+		const agentDoc: Nested = {
+			name: "agent",
+			description: `Start a subagent on a task and get its result. It runs on your model with all your tools (except agent), sees your current VIEW as context, and does only the task. Its work stays out of your memory. Run several with Promise.all.
+With no schema it resolves to its reply as a string. With schema (a JSON Schema) it resolves to a parsed object matching it, for use in code.
+Example: const r = await tools.agent({ task: "Find every open PR in repo X that touches billing", schema: { type: "array", items: { type: "object", properties: { url: { type: "string" }, why: { type: "string" } }, required: ["url", "why"] } } });`,
+			inputSchema: Type.Object({ task: Type.String(), schema: Type.Optional(Type.Unknown()) }),
+			execute: () => Promise.reject(new Error("unbound")),
+		};
 		const system = `${MASTER}\n\n${VIEW_DOC}\n\n${SELF}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
+		nested.push(agentDoc);
 		this.#prompt = `# System prompt\n\n${system}\n\n# codemode tool description\n\n${describe(nested)}\n`;
 		const registry = createRegistry();
 		registry.install(defineExtension({
 			name: "raubot",
 			sections: [section("raubot", () => system, { tag: false })],
 			tools: [defineTool({
-				name: "codemode", replay: "unsafe", description: describe(nested),
+				name: "codemode", replay: "safe", description: describe(nested),
 				parameters: Type.Object({ code: Type.String({ description: "Raw JavaScript source." }) }),
-				execute: async ({ code }, _api, ctx) => {
+				execute: async ({ code }, api, ctx) => {
 					const store = (await this.ctx.storage.get<Record<string, unknown>>("codemode-store")) ?? {};
-					const r = await codemode(code, nested, store, (ctx as { signal?: AbortSignal }).signal, executor.app);
+					const tools = nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(api, ctx) } : t));
+					const freezer = this.#freezer(String(api.taskId));
+					const r = await codemode(code, tools, store, (ctx as { signal?: AbortSignal }).signal, executor.app, freezer);
+					await freezer.clear();
 					if (!r.error) await this.ctx.storage.put("codemode-store", store);
 					return { content: [{ type: "text", text: r.text }], isError: r.error };
 				},
@@ -291,6 +305,70 @@ Example: find the Slack messages that need the user's attention.
 			await this.ctx.storage.delete("reply");
 			console.log(r.channel, await this.#channels[r.channel]!(r.to, reply));
 		} finally { this.#delivering = false; }
+	}
+
+	/** A running script's frozen VM, gzipped in 1 MB chunks (the per-value limit is 2 MB). */
+	#freezer(task: string): Freezer & { clear(): Promise<void> } {
+		const key = `frozen:${task}`;
+		let chain = Promise.resolve();
+		const zip = (b: Uint8Array, z: CompressionStream | DecompressionStream) => new Response(new Blob([b]).stream().pipeThrough(z)).bytes();
+		return {
+			load: async () => {
+				const f = await this.ctx.storage.get<Omit<Frozen, "image"> & { n: number }>(key);
+				if (!f) return undefined;
+				const parts = await this.ctx.storage.get<Uint8Array>(Array.from({ length: f.n }, (_, i) => `${key}:${i}`));
+				return { ...f, image: await zip(new Uint8Array(await new Blob([...parts.values()]).arrayBuffer()), new DecompressionStream("gzip")) };
+			},
+			save: (f) => (chain = chain.then(async () => {
+				const z = await zip(f.image, new CompressionStream("gzip"));
+				const n = Math.ceil(z.length / (1 << 20));
+				const entries: Record<string, unknown> = { [key]: { ...f, image: undefined, n } };
+				for (let i = 0; i < n; i++) entries[`${key}:${i}`] = z.slice(i << 20, (i + 1) << 20);
+				await this.ctx.storage.put(entries);
+			}).catch((e) => console.error("freeze", e))),
+			clear: async () => {
+				await chain;
+				const keys = [...(await this.ctx.storage.list({ prefix: key })).keys()];
+				if (keys.length) await this.ctx.storage.delete(keys);
+			},
+		};
+	}
+
+	/** `tools.agent`: a child conversation owned by the codemode call, keyed by the script's call id so a thawed script finds it again. */
+	#agent(api: ToolExecutionApi, ctx: Context) {
+		return async ({ task, schema }: { task: string; schema?: object }, call: number) => {
+			if (api.conversationId !== this.root.id) throw new Error("A subagent can't start subagents.");
+			const key = `agent:${api.taskId}:${call}`;
+			let id: string | undefined = await this.ctx.storage.get<string>(key);
+			if (!id) {
+				id = await api.commit(async (tx) => {
+					const c = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
+					await configure(tx, c.id, { instructions: SUBAGENT });
+					return String(c.id);
+				}, ctx);
+				await this.ctx.storage.put(key, id);
+			}
+			const child = (await api.conversation(id as never, ctx))!;
+			const ask = async (content: string, n: number) => {
+				await (await child.submit({ type: "input", content, requestId: `${key}:${n}` }, ctx)).wait(ctx);
+				const page = await (await this.harness.conversation(id as never, C))!.entries({}, 50, undefined, C);
+				for (const e of page.items) for (const m of [...(e.model ?? [])].reverse()) if (m.role === "assistant") { const t = text(m.content); if (t) return t; }
+				return "";
+			};
+			const shape = schema && `\n\nReply with only JSON (no prose, no code fence) matching this JSON Schema:\n${JSON.stringify(schema)}`;
+			let reply = await ask(`Task: ${task}${shape ?? ""}`, 0);
+			if (!schema) return reply;
+			for (let n = 1; ; n++) {
+				let v: unknown, err: string;
+				try {
+					v = JSON.parse(reply.replace(/^```(?:json)?\s*|\s*```$/g, ""));
+					if (Value.Check(schema, v)) return v;
+					err = [...Value.Errors(schema, v)].slice(0, 5).map((e) => `${e.instancePath || "/"} ${e.message}`).join("; ");
+				} catch (e) { err = String(e); }
+				if (n > 2) throw new Error(`Subagent reply doesn't match the schema: ${err}`);
+				reply = await ask(`That reply doesn't match the schema (${err}). Reply again with only the JSON.${shape}`, n);
+			}
+		};
 	}
 
 	busy() { return (this.state.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; }
