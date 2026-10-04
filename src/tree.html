@@ -37,7 +37,7 @@ function node(p){
     d.after(kids);d.classList.add("open")};
   return d}
 get().then(r=>{
-  $("stats").textContent=`${r.log} messages · ${r.view.length} lines · ${(r.bytes/1000).toFixed(1)} KB · ${r.pending} pending`;
+  $("stats").textContent=`${r.log} messages · ${r.view.length} lines · ${(r.bytes/1000).toFixed(1)} KB · ${r.pending?"summarizing":"settled"}`;
   for(const p of r.view)$("view").append(node(p));
   const u=r.usage.slice().reverse();
   $("usage").innerHTML="<tr><th>time</th><th>input</th><th>cache read</th><th>cache write</th><th>output</th><th>hit</th></tr>"+u.map(x=>{const tot=x.input+x.cacheRead+x.cacheWrite;return`<tr><td>${new Date(x.date).toLocaleTimeString()}</td><td>${x.input}</td><td>${x.cacheRead}</td><td>${x.cacheWrite}</td><td>${x.output}</td><td>${tot?Math.round(100*x.cacheRead/tot):0}%</td></tr>`}).join("");
