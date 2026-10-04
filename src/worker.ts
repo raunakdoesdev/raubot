@@ -339,12 +339,12 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		return async ({ task, schema }: { task: string; schema?: object }, call: number) => {
 			if (api.conversationId !== this.root.id) throw new Error("A subagent can't start subagents.");
 			const key = `agent:${api.taskId}:${call}`;
-			let id: string | undefined = await this.ctx.storage.get<string>(key);
+			let id = await this.ctx.storage.get<number>(key);
 			if (!id) {
 				id = await api.commit(async (tx) => {
 					const c = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
 					await configure(tx, c.id, { instructions: SUBAGENT });
-					return String(c.id);
+					return c.id as unknown as number;
 				}, ctx);
 				await this.ctx.storage.put(key, id);
 			}
