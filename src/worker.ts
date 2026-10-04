@@ -25,7 +25,7 @@ import settings from "./settings.html";
 import tree from "./tree.html";
 import ui from "./ui.html";
 
-type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Box>; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string };
+type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Box>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string };
 
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
@@ -82,7 +82,7 @@ export class Raubot extends DurableObject<Env> {
 			catch (e) { console.error("executor", e); return { nested: [] }; }
 		}
 		const nested = list.filter((t) => t.name !== "execute").map((t) => ({
-			name: t.name, description: t.description ?? t.name, inputSchema: t.inputSchema,
+			name: t.name, description: (t.description ?? t.name).replace(/paused execute program/g, "paused app call").replace(/namespaces used by execute/g, "namespaces on `tools`"), inputSchema: t.inputSchema,
 			execute: (args: Record<string, unknown>) => mcp.call(t.name, args),
 		}));
 		const ref = (path: string[]) => path.map((k) => (/^[A-Za-z_$][\w$]*$/.test(k) ? `.${k}` : `[${JSON.stringify(k)}]`)).join("");

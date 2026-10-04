@@ -12,7 +12,12 @@ The design follows Victor Taelin's [OptChat](https://gist.github.com/VictorTaeli
 - `src/memory.ts`: the log, the summary tree, the compactor (8 parallel jobs, retries) and the incremental view fold (128 KB budget, "most due pair" merging).
 - `src/sql.ts`: pi-durable's `SqliteDatabase` interface over `ctx.storage.sql`.
 - `src/prompts.ts`: the system and compactor prompts, plus the constants.
+- `src/box.ts`: the `Box` container behind the `bash` tool. `/workspace` is a clone of the Artifacts repo `raubot/workspace`, auto-committed and pushed after every command, so it persists. `/workspace/raubot` is a clone of this repo.
 - `src/ui.html`: a minimal chat page.
+
+## Source and deploys
+
+The code lives in the Cloudflare Artifacts repo `raubot/raubot` (namespace `raubot`). Workers Builds deploys every push to `main`. The box gets short-lived Artifacts tokens from the `ARTIFACTS` binding, so it needs no GitHub or Cloudflare tokens.
 
 ## Run
 
