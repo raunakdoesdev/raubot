@@ -14,12 +14,14 @@ import type { EntryId } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
-import { MARKS, MASTER, VIEW_DOC } from "./prompts.ts";
+import { MARKS, MASTER, SELF, VIEW_DOC } from "./prompts.ts";
 import { DoSqlite } from "./sql.ts";
+import type { Box } from "./box.ts";
+export { Box } from "./box.ts";
 import tree from "./tree.html";
 import ui from "./ui.html";
 
-type Env = { RAUBOT: DurableObjectNamespace<Raubot>; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; MODEL: string; COMPACT_MODEL: string };
+type Env = { RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Box>; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; MODEL: string; COMPACT_MODEL: string };
 
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
@@ -83,8 +85,14 @@ export class Raubot extends DurableObject<Env> {
 		const registry = createRegistry();
 		registry.install(defineExtension({
 			name: "raubot",
-			sections: [section("raubot", () => `${MASTER}\n\n${VIEW_DOC}`, { tag: false })],
+			sections: [section("raubot", () => `${MASTER}\n\n${VIEW_DOC}\n\n${SELF}`, { tag: false })],
 			tools: [
+				defineTool({
+					name: "bash", replay: "unsafe",
+					description: "Run a bash command in your Linux box (cwd /workspace). Output is combined stdout+stderr with the exit code. Default timeout 120s, max 900s.",
+					parameters: Type.Object({ cmd: Type.String(), timeout: Type.Optional(Type.Integer()) }),
+					execute: async ({ cmd, timeout }) => ({ content: [{ type: "text", text: await this.env.BOX.getByName("main").bash(cmd, Math.min(timeout ?? 120, 900)) }] }),
+				}),
 				defineTool({
 					name: "zoom", replay: "safe",
 					description: "Look closer at messages id..id+n-1: n>1 gives the two half summaries, n=1 the full original message.",

@@ -7,6 +7,7 @@
 	"routes": [{ "pattern": "raubot.reducto.ai", "custom_domain": true }],
 	"vars": { "PROVIDER": "openrouter",
 		"MODEL": "anthropic/claude-opus-5.5", "COMPACT_MODEL": "gpt-5.4-mini" },
-	"durable_objects": { "bindings": [{ "name": "RAUBOT", "class_name": "Raubot" }] },
-	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Raubot"] }]
+	"durable_objects": { "bindings": [{ "name": "RAUBOT", "class_name": "Raubot" }, { "name": "BOX", "class_name": "Box" }] },
+	"containers": [{ "class_name": "Box", "image": "registry.cloudflare.com/fadf1a80d9469afc81af5899893cd853/raubot-box:v1", "max_instances": 1, "instance_type": "standard-1" }],
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Raubot"] }, { "tag": "v2", "new_sqlite_classes": ["Box"] }]
 }
