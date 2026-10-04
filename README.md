@@ -12,7 +12,7 @@ The design follows Victor Taelin's [OptChat](https://gist.github.com/VictorTaeli
 - `src/memory.ts`: the log, the summary tree, the compactor (8 parallel jobs, retries) and the incremental view fold (128 KB budget, "most due pair" merging).
 - `src/sql.ts`: pi-durable's `SqliteDatabase` interface over `ctx.storage.sql`.
 - `src/prompts.ts`: the system and compactor prompts, plus the constants.
-- `src/box.ts`: the `Computer` container (Durable Object scheduling policy, needed for snapshots) behind the `bash` tool. `/workspace` is a clone of the Artifacts repo `raubot/workspace`, auto-committed and pushed after every command (files over 10 MB are git-ignored). The whole container filesystem is also saved as a Container snapshot when idle for 10 minutes (and every 15 minutes while in use), so installs and big files persist. `/workspace/raubot` is a clone of this repo.
+- `src/box.ts`: the `Computer` container (Durable Object scheduling policy, needed for snapshots) behind the `bash` tool. `/workspace` is a clone of the Artifacts repo `raubot/workspace`, auto-committed and pushed after every command (files over 10 MB are git-ignored). The whole container filesystem is also saved as a Container snapshot when idle for 10 minutes (and every 15 minutes while in use), so installs and big files persist. `/workspace/raubot` is a clone of this repo. `/workspace/setup.sh` is the install recipe, re-run when the box starts without a snapshot; `/scratch` is untracked scratch space, emptied before the box stops. Don't change the Dockerfile (it would invalidate snapshots); install in the box instead.
 - `src/ui.html`: a minimal chat page.
 
 ## Source and deploys

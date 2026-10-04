@@ -21,10 +21,15 @@ git remote set-url origin "$WORKSPACE_REMOTE"
 grep -qx raubot/ .gitignore 2>/dev/null || { printf 'raubot/\nnode_modules/\n' >> .gitignore; git rm -rq --cached --ignore-unmatch raubot; }
 [ -d raubot/.git ] || git clone -q "$RAUBOT_REMOTE" raubot
 git -C raubot remote set-url origin "$RAUBOT_REMOTE"
-cd raubot && [ -d node_modules ] || npm ci --silent --no-audit --no-fund`;
+(cd raubot && [ -d node_modules ] || npm ci --silent --no-audit --no-fund)
+mkdir -p /scratch
+[ -z "$FRESH" ] || [ ! -f setup.sh ] || bash setup.sh`;
 
 /** Files over 10 MB are kept out of git (Artifacts caps files at 32 MB); snapshots keep them. */
 const SAVE = `git ls-files -oz --exclude-standard | xargs -0 -r sh -c 'find "$@" -maxdepth 0 -size +10M' _ >> .gitignore; git add -A && { git diff --cached --quiet || git commit -qm "$MSG"; } && { git push -q origin HEAD:main 2>&1 || git pull -q --rebase origin main && git push -q origin HEAD:main; }`;
+
+/** /scratch is for big throwaway files: never in git, emptied before the box stops. */
+const WIPE = "rm -rf /scratch/* /scratch/.[!.]*";
 
 export class Computer extends DurableObject<Env> {
 	#ready?: Promise<void>;
@@ -58,6 +63,7 @@ export class Computer extends DurableObject<Env> {
 			const image = c.images.box;
 			const snap = await this.ctx.storage.get<{ id: string; image: string }>("snapshot");
 			const restore = !c.running && snap?.image === image;
+			const fresh = !c.running && !restore;
 			if (!c.running) {
 				c.start({ ...(restore ? { containerSnapshot: { id: snap.id } } : { image }), instance: "standard-1", enableInternet: true, env });
 				await this.ctx.storage.put("saved", Date.now());
@@ -73,7 +79,7 @@ export class Computer extends DurableObject<Env> {
 			}
 			await c.setInactivityTimeout(5 * TICK);
 			if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + TICK);
-			const r = await this.#run(SETUP, 300_000);
+			const r = await this.#run(SETUP, 900_000, fresh ? { FRESH: "1" } : {});
 			this.#note = r.exitCode ? `[box setup failed]\n${r.out}\n` : "";
 		})().catch((e) => { this.#ready = undefined; throw e; }));
 	}
@@ -107,6 +113,7 @@ export class Computer extends DurableObject<Env> {
 	async stop() {
 		const c = this.ctx.container!;
 		if (c.running) {
+			await this.#run(WIPE, 60_000);
 			await this.#snapshot();
 			this.#ready = undefined;
 			await c.destroy("stop");
@@ -126,6 +133,7 @@ export class Computer extends DurableObject<Env> {
 		const last = (await this.ctx.storage.get<number>("last")) ?? 0;
 		const saved = (await this.ctx.storage.get<number>("saved")) ?? 0;
 		const idle = !this.#busy && now - last > IDLE;
+		if (idle) await this.#run(WIPE, 60_000);
 		if (idle || (!this.#busy && last > saved && now - saved > CHECKPOINT)) await this.#snapshot();
 		if (idle && !this.#busy && (await this.ctx.storage.get<number>("last")) === last) {
 			this.#ready = undefined;
