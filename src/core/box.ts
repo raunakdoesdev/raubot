@@ -33,6 +33,12 @@ const SAVE = `git ls-files -oz --exclude-standard | xargs -0 -r sh -c 'find "$@"
 /** /scratch is for big throwaway files: never in git, emptied before the box stops. */
 const WIPE = "rm -rf /scratch/* /scratch/.[!.]*";
 
+/** A timeout signal that is cleared when the command ends: an abort that fires after an exec finished throws an internal error. */
+const deadline = (ms: number) => {
+	const c = new AbortController(), t = setTimeout(() => c.abort(new Error(`timed out after ${ms / 1000}s`)), ms);
+	return { signal: c.signal, [Symbol.dispose]: () => clearTimeout(t) };
+};
+
 export class Computer extends DurableObject<Env> {
 	#ready?: Promise<void>;
 	#note = "";
@@ -40,7 +46,8 @@ export class Computer extends DurableObject<Env> {
 	#busy = 0;
 
 	async #run(cmd: string, ms: number, env?: Record<string, string>) {
-		const p = await this.ctx.container!.exec(["bash", "-lc", cmd], { cwd: "/workspace", stderr: "combined", signal: AbortSignal.timeout(ms), env: { ...this.#env, ...env } });
+		using t = deadline(ms);
+		const p = await this.ctx.container!.exec(["bash", "-lc", cmd], { cwd: "/workspace", stderr: "combined", signal: t.signal, env: { ...this.#env, ...env } });
 		const { stdout, exitCode } = await p.output();
 		return { out: new TextDecoder().decode(stdout), exitCode };
 	}
@@ -68,12 +75,14 @@ export class Computer extends DurableObject<Env> {
 			const snap = await this.ctx.storage.get<{ id: string; image: string }>("snapshot");
 			const restore = !c.running && snap?.image === image;
 			const fresh = !c.running && !restore;
+			console.log("box boot", JSON.stringify({ running: c.running, restore, fresh }));
 			if (!c.running) {
 				c.start({ ...(restore ? { containerSnapshot: { id: snap.id } } : { image }), instance: "standard-1", enableInternet: true, env });
 				await this.ctx.storage.put("saved", Date.now());
 			}
 			for (let i = 0; ; i++) {
 				try { await this.#run("true", 10_000); break; } catch (e) {
+					console.log("box exec not ready", JSON.stringify({ i, running: c.running, restore, error: String(e) }));
 					if (i > 60) {
 						if (restore) await this.ctx.storage.delete("snapshot");
 						throw e;
@@ -100,6 +109,7 @@ export class Computer extends DurableObject<Env> {
 			this.#note = "";
 			return clip(`${note}${out}\n[exit ${exitCode}]`);
 		} catch (e) {
+			console.log("box bash failed", String(e));
 			return clip(`error: ${e instanceof Error ? e.message : String(e)}`);
 		} finally {
 			this.#busy--;
@@ -113,7 +123,8 @@ export class Computer extends DurableObject<Env> {
 		try {
 			await this.#boot();
 			await this.ctx.storage.put("last", Date.now());
-			const p = await this.ctx.container!.exec(["bash", "-lc", cmd], { cwd: "/workspace", stdin: new Blob([stdin]).stream(), stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(seconds * 1000), env: { ...this.#env, ...env } });
+			using t = deadline(seconds * 1000);
+			const p = await this.ctx.container!.exec(["bash", "-lc", cmd], { cwd: "/workspace", stdin: new Blob([stdin]).stream(), stdout: "pipe", stderr: "pipe", signal: t.signal, env: { ...this.#env, ...env } });
 			const { stdout, stderr, exitCode } = await p.output();
 			const d = new TextDecoder();
 			return { out: d.decode(stdout), err: d.decode(stderr), exitCode };
@@ -127,7 +138,8 @@ export class Computer extends DurableObject<Env> {
 	async write(path: string, bytes: Uint8Array) {
 		await this.#boot();
 		await this.ctx.storage.put("last", Date.now());
-		const p = await this.ctx.container!.exec(["bash", "-c", 'mkdir -p "$(dirname "$F")" && cat > "$F"'], { cwd: "/workspace", stdin: new Blob([bytes]).stream(), stderr: "combined", env: { ...this.#env, F: path }, signal: AbortSignal.timeout(120_000) });
+		using t = deadline(120_000);
+		const p = await this.ctx.container!.exec(["bash", "-c", 'mkdir -p "$(dirname "$F")" && cat > "$F"'], { cwd: "/workspace", stdin: new Blob([bytes]).stream(), stderr: "combined", env: { ...this.#env, F: path }, signal: t.signal });
 		const { stdout, exitCode } = await p.output();
 		if (exitCode) throw new Error(`write ${path}: ${new TextDecoder().decode(stdout)}`);
 	}
