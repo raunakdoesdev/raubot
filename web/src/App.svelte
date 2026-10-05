@@ -115,14 +115,51 @@
 		tick().then(fit);
 		down(true);
 	}
-	async function pick() {
+	/** Uploads files exactly like the attach button: one POST /upload each, paths added to the draft. */
+	async function attach(list: File[]) {
+		if (!list.length) return;
+		uploading += list.length;
+		await Promise.all(list.map(async (f) => {
+			try {
+				const fd = new FormData(); fd.append("file", f, f.name);
+				const r = await fetch("/upload", { method: "POST", body: fd });
+				if (r.ok) files.push((await r.json()).path); else note = `upload failed: ${await r.text()}`;
+			} catch (e) { note = `upload failed: ${e instanceof Error ? e.message : e}`; }
+			finally { uploading--; }
+		}));
+	}
+	function pick() {
 		const picked = [...(picker.files ?? [])];
-		picker.value = ""; uploading += picked.length;
-		await Promise.all(picked.map(async (f) => {
-			const fd = new FormData(); fd.append("file", f);
-			const r = await fetch("/upload", { method: "POST", body: fd });
-			if (r.ok) files.push((await r.json()).path); else note = `upload failed: ${await r.text()}`;
-			uploading--;
+		picker.value = "";
+		attach(picked);
+	}
+	// Drag and drop: a counter (not the event target) tracks enter/leave so child elements don't flicker the overlay.
+	let drag = $state(false), depth = 0;
+	const hasFiles = (e: DragEvent) => !!e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+	function dragenter(e: DragEvent) { if (!hasFiles(e)) return; e.preventDefault(); depth++; drag = true; }
+	function dragover(e: DragEvent) { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer!.dropEffect = "copy"; drag = true; }
+	function dragleave(e: DragEvent) { if (!hasFiles(e)) return; if (--depth <= 0) { depth = 0; drag = false; } }
+	function drop(e: DragEvent) {
+		depth = 0; drag = false;
+		if (!hasFiles(e)) return;
+		e.preventDefault();
+		attach([...(e.dataTransfer?.files ?? [])]);
+	}
+	// Stops a file dropped outside the chat from making the browser open it; resets the overlay if a drag ends elsewhere.
+	const guard = (e: DragEvent) => { if (hasFiles(e)) { e.preventDefault(); if (e.type === "drop") { depth = 0; drag = false; } } };
+	// Pasted images (screenshots etc.) attach; pasted text is left alone.
+	function paste(e: ClipboardEvent) {
+		const d = e.clipboardData;
+		if (!d) return;
+		let got = [...d.files];
+		if (!got.length) got = [...d.items].filter((x) => x.kind === "file").map((x) => x.getAsFile()).filter((f): f is File => !!f);
+		if (!got.length) return;
+		e.preventDefault();
+		const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+		attach(got.map((f, k) => {
+			const ext = (f.type.split("/")[1] || "bin").replace("jpeg", "jpg").replace(/\+.*/, "");
+			const generic = !f.name || /^image\.\w+$/i.test(f.name);
+			return generic ? new File([f], `pasted-${stamp}${got.length > 1 ? `-${k + 1}` : ""}.${ext}`, { type: f.type }) : f;
 		}));
 	}
 	const key = (e: KeyboardEvent) => {
@@ -130,10 +167,19 @@
 	};
 </script>
 
+<svelte:window ondragover={guard} ondrop={guard} />
 <div class="flex h-dvh overflow-hidden">
 <Sidebar bind:selected bind:open={menu} />
 {#if selected}{#key selected}<AgentView id={selected} onmenu={() => (menu = true)} />{/key}{/if}
-<div class="flex h-dvh min-w-0 flex-1 flex-col overflow-hidden" class:hidden={selected !== 0}>
+<div class="relative flex h-dvh min-w-0 flex-1 flex-col overflow-hidden" class:hidden={selected !== 0} role="region" aria-label="chat" ondragenter={dragenter} ondragover={dragover} ondragleave={dragleave} ondrop={drop}>
+	{#if drag}
+		<div class="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-background/80 p-6 backdrop-blur-sm">
+			<div class="flex h-full w-full max-w-3xl flex-col items-center justify-center gap-2 rounded-3xl border-2 border-dashed border-primary/60 text-muted-foreground">
+				<Paperclip class="size-8" />
+				<span class="text-base font-medium text-foreground">Drop files to attach</span>
+			</div>
+		</div>
+	{/if}
 	<Header>
 		{#snippet lead()}<Button variant="ghost" size="icon-sm" class="md:hidden" aria-label="menu" onclick={() => (menu = true)}><PanelLeft /></Button>{/snippet}
 		<span class="truncate text-sm text-muted-foreground">{status}</span>
@@ -176,7 +222,7 @@
 					{#if uploading}<Badge variant="outline" class="font-normal text-muted-foreground">uploading {uploading}…</Badge>{/if}
 				</div>
 			{/if}
-			<textarea bind:this={box} bind:value={text} oninput={fit} onkeydown={key} rows="1" placeholder="Message raubot" enterkeyhint="send" autocomplete="off"
+			<textarea bind:this={box} bind:value={text} oninput={fit} onkeydown={key} onpaste={paste} rows="1" placeholder="Message raubot" enterkeyhint="send" autocomplete="off"
 				class="block max-h-[38dvh] w-full resize-none bg-transparent px-2 py-1.5 text-base outline-none placeholder:text-muted-foreground"></textarea>
 			<div class="flex items-center gap-1">
 				<Button type="button" variant="ghost" size="icon-sm" class="rounded-full text-muted-foreground" aria-label="attach" onclick={() => picker.click()}><Paperclip /></Button>
