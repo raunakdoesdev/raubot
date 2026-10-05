@@ -164,7 +164,8 @@ export class Raubot extends DurableObject<Env> implements Core {
 		models.setProvider(openrouterProvider());
 		const stream = models.streamSimple.bind(models);
 		models.streamSimple = (model, context, options) =>
-			stream(model, context, model.api === "anthropic-messages" ? { ...options, onPayload: (p: unknown) => withSearch(model.provider, markView(this.#marks)(p) ?? (p as AnthropicPayload)) }
+			// One session id for raubot and its subagents: OpenRouter routes by it, so a new subagent lands on the provider that holds raubot's cached prefix.
+stream(model, context, model.api === "anthropic-messages" ? { ...options, sessionId: `raubot-${this.ctx.id}`, onPayload: (p: unknown) => withSearch(model.provider, markView(this.#marks)(p) ?? (p as AnthropicPayload)) }
 				: model.api === "openai-responses" ? { ...options, onPayload: responses } : options);
 		const compactor = models.getModel("openrouter", this.env.COMPACT_MODEL)!;
 		this.memory = new Memory(this.ctx.storage.sql, async (systemPrompt, prompt) => {
