@@ -53,12 +53,34 @@ async function browser() {
 	return ctx;
 }
 
+// Logins shared across boxes: before a run, cookies another box changed come in; after it, the domains this run changed go out.
+let base = new Map();
+const byDomain = (cs) => { const m = new Map(); for (const c of cs) m.set(c.domain, [...(m.get(c.domain) ?? []), c]); return m; };
+const key = (cs = []) => JSON.stringify(cs.map(({ name, value, path }) => [name, value, path]).sort());
+async function share(jar = {}) {
+	const have = byDomain(await ctx.cookies());
+	for (const [d, cs] of Object.entries(jar)) {
+		if (key(have.get(d)) === key(cs)) continue;
+		await ctx.clearCookies({ domain: d });
+		await ctx.addCookies(cs);
+	}
+	base = byDomain(await ctx.cookies());
+}
+async function changed() {
+	const now = byDomain(await ctx.cookies());
+	const out = {};
+	for (const d of new Set([...base.keys(), ...now.keys()])) if (key(base.get(d)) !== key(now.get(d))) out[d] = now.get(d) ?? [];
+	base = now;
+	return out;
+}
+
 const remember = (ref, v) => { if (v.length >= 4) used.set(v, ref); return v; };
 const scrub = (s) => { for (const [v, ref] of used) s = s.split(v).join(`[${ref}]`); return s; };
 const show = (v) => (typeof v === "string" ? v : (() => { try { return JSON.stringify(v, null, 1); } catch { return String(v); } })());
 
-async function run({ code, timeout = 60 }) {
+async function run({ code, timeout = 60, jar }) {
 	await browser();
+	await share(jar).catch((e) => console.error("jar", e.message));
 	await loadKeys().catch((e) => console.error("passkeys", e.message));
 	if (page.isClosed()) page = ctx.pages().at(-1) ?? (await ctx.newPage());
 	const out = [], images = [];
@@ -83,7 +105,7 @@ async function run({ code, timeout = 60 }) {
 	if (page.isClosed()) page = ctx.pages().at(-1) ?? (await ctx.newPage());
 	if (!images.length) await screenshot().catch(() => {});
 	const all = await Promise.all(ctx.pages().map(async (p, i) => `${p === page ? "*" : " "}${i} ${await p.title().catch(() => "")} ${p.url()}`));
-	return { out: scrub(out.join("\n")), error, images, tabs: all.join("\n") };
+	return { out: scrub(out.join("\n")), error, images, tabs: all.join("\n"), changed: await changed().catch(() => ({})) };
 }
 
 let chain = Promise.resolve();

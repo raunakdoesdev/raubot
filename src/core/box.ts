@@ -222,6 +222,16 @@ export class Computer extends DurableObject<Env> {
 		await this.ctx.storage.deleteAll();
 	}
 
+	/** Browser logins every box shares, kept on the main box: cookies by domain, the newest push wins. */
+	async jar() {
+		const all = await this.ctx.storage.list<unknown[]>({ prefix: "jar:" });
+		return Object.fromEntries([...all].map(([k, v]) => [k.slice(4), v]));
+	}
+
+	async jarPut(changed: Record<string, unknown[]>) {
+		for (const [d, cs] of Object.entries(changed)) await (cs.length ? this.ctx.storage.put(`jar:${d}`, cs) : this.ctx.storage.delete(`jar:${d}`));
+	}
+
 	async status() {
 		const [snapshot, last, saved, alarm] = await Promise.all(["snapshot", "last", "saved"].map((k) => this.ctx.storage.get(k)).concat(this.ctx.storage.getAlarm()));
 		return { running: this.ctx.container!.running, images: this.ctx.container!.images, snapshot, last, saved, alarm };

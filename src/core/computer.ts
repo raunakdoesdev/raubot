@@ -5,11 +5,12 @@ import { Box } from "./fx.ts";
 /** Fetch browser/ from raubot main, install its packages and Chromium once (kept by snapshots), then run. Install noise goes to stderr. */
 const ENSURE = `flock /tmp/browser.lock sh -c 'git -C raubot fetch -q && git -C raubot checkout -q origin/main -- browser && cd raubot/browser && { [ -d node_modules ] || npm i -s --no-audit --no-fund; } && ln -sf "$PWD/vault" /usr/local/bin/vault && { [ -f ~/.raubot/chromium ] || { npx playwright install --with-deps chromium && mkdir -p ~/.raubot && touch ~/.raubot/chromium; }; }' >&2`;
 
-export type Shot = { out: string; error?: boolean; images: string[]; tabs: string };
+export type Jar = Record<string, unknown[]>;
+export type Shot = { out: string; error?: boolean; images: string[]; tabs: string; changed?: Jar };
 
-export const browse = (code: string, timeout: number, env: Record<string, string>) => Effect.gen(function* () {
+export const browse = (code: string, timeout: number, env: Record<string, string>, jar: Jar = {}) => Effect.gen(function* () {
 	const box = yield* Box;
-	const r = yield* box.exec(`${ENSURE} && node raubot/browser/cli.mjs run`, JSON.stringify({ code, timeout }), timeout + 600, env);
+	const r = yield* box.exec(`${ENSURE} && node raubot/browser/cli.mjs run`, JSON.stringify({ code, timeout, jar }), timeout + 600, env);
 	if (r.exitCode) return { out: `browser failed (exit ${r.exitCode}):\n${r.err.slice(-3000)}`, error: true, images: [], tabs: "" } satisfies Shot;
 	return JSON.parse(r.out) as Shot;
 });

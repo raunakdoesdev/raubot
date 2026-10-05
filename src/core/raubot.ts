@@ -17,7 +17,7 @@ import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
 import { BROWSER, COMPUTER, CRONS, DEVIN, EXECUTOR, HEARTBEAT, MARKS, MASTER, SELF, SETTLE, VIEW, VIEW_DOC } from "./prompts.ts";
-import { browse, responses } from "./computer.ts";
+import { browse, responses, type Jar } from "./computer.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Computer } from "./box.ts";
 import { type App, codemode, describe, type Freezer, type Nested } from "./codemode.ts";
@@ -304,9 +304,9 @@ A valid callback comes to you as a "[devin <id> done|blocked|failed]" message wi
 		const agentDoc: Nested = {
 			name: "agent",
 			description: `Start a subagent on a task and get its result. It runs on your model with all your tools (except agent and agents), sees your current VIEW as context, and does only the task. Its work stays out of your memory. Run several with Promise.all.
-Each subagent has its own box, copied from your box's last snapshot (same files, installs and browser logins), so they never collide. Its /workspace commits merge into workspace main when it replies, and show up in your /workspace on your next bash call; a conflict it can't fix stays on branch agent-<id>.
+Each subagent has its own box, copied from your box's last snapshot (same files and installs), so they never collide. Its /workspace commits merge into workspace main when it replies, and show up in your /workspace on your next bash call; a conflict it can't fix stays on branch agent-<id>.
 With no schema it resolves to its reply as a string. With schema (a JSON Schema) it resolves to a parsed object matching it, for use in code.
-With computer: true it runs on GPT-6.1 Sol with a browser too: a real Chromium in your box that keeps its logins between tasks and signs in with the user's Bitwarden passwords, TOTP codes and passkeys. Use it for anything done on a website.  A browser task takes minutes, longer than a foreground script may run, so start it in a background codemode job (timeout 1800) and steer or check it with tools.agents.
+With computer: true it runs on GPT-6.1 Sol with a browser too: a real Chromium in its own box whose logins are shared with every box (a login or logout in one shows up in the others on their next browser call) and signs in with the user's Bitwarden passwords, TOTP codes and passkeys. Use it for anything done on a website.  A browser task takes minutes, longer than a foreground script may run, so start it in a background codemode job (timeout 1800) and steer or check it with tools.agents.
 Example: const r = await tools.agent({ task: "Find every open PR in repo X that touches billing", schema: { type: "array", items: { type: "object", properties: { url: { type: "string" }, why: { type: "string" } }, required: ["url", "why"] } } });`,
 			inputSchema: Type.Object({ task: Type.String(), schema: Type.Optional(Type.Unknown()), computer: Type.Optional(Type.Boolean()) }),
 			execute: () => Promise.reject(new Error("unbound")),
@@ -349,7 +349,9 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				parameters: Type.Object({ code: Type.String({ description: "JavaScript, run as an async function body." }), timeout: Type.Optional(Type.Integer({ description: "Seconds, default 60, max 600." })) }),
 				execute: async ({ code, timeout }, api) => {
 					const env = await fx(Effect.flatMap(Secrets, (s) => s.env()));
-					const r = await fx(browse(code, Math.min(timeout ?? 60, 600), env).pipe(Effect.provide(BoxLive(ns, this.#boxOf(api.conversationId)))));
+					const main = ns.getByName("main");
+					const r = await fx(browse(code, Math.min(timeout ?? 60, 600), env, (await main.jar()) as Jar).pipe(Effect.provide(BoxLive(ns, this.#boxOf(api.conversationId)))));
+					if (r.changed && Object.keys(r.changed).length) await main.jarPut(r.changed);
 					return {
 						content: [{ type: "text", text: redact(env, `${r.out || "(no output)"}\n\ntabs (* is page):\n${r.tabs}`) }, ...r.images.map((data) => ({ type: "image" as const, mimeType: "image/jpeg", data }))],
 						isError: r.error,
