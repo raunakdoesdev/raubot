@@ -185,7 +185,9 @@ stream(model, context, model.api === "anthropic-messages" ? { ...options, sessio
 
 		const memory = this.memory;
 		const executor = await this.#executor();
-		const nested: Nested[] = [
+		// bash/read/edit/write run in the caller's box: raubot's ("main") or a subagent's own ("agent-<id>").
+		const ns = this.env.BOX;
+		const boxTools = (box: string): Nested[] => [
 			{
 				name: "bash",
 				description: "Run a bash command in your Linux box (cwd /workspace). Pass the command as cmd (or command, as in pi). Output is combined stdout+stderr with the exit code, cut in the middle past 30k chars. Default timeout 120s, max 900s. Your secrets are env vars in every command. To read, change or create files, prefer tools.read/edit/write over cat, sed and heredocs.",
@@ -195,7 +197,7 @@ stream(model, context, model.api === "anthropic-messages" ? { ...options, sessio
 					if (typeof c !== "string") return yield* Effect.fail(new Error("bash needs cmd (or command)"));
 					const env = yield* Effect.flatMap(Secrets, (s) => s.env());
 					return redact(env, yield* bash(c, Math.min(timeout ?? 120, 900), env));
-				})),
+				}).pipe(Effect.provide(BoxLive(ns, box)))),
 			},
 			{
 				name: "read",
@@ -206,7 +208,7 @@ stream(model, context, model.api === "anthropic-messages" ? { ...options, sessio
 					const box = yield* Box;
 					const r = yield* Effect.tryPromise({ try: () => files.read((c, i, t) => Effect.runPromise(box.exec(c, i, t)), args), catch: (e) => e as Error });
 					return typeof r === "string" ? redact(env, r) : r;
-				})),
+				}).pipe(Effect.provide(BoxLive(ns, box)))),
 			},
 			{
 				name: "edit",
@@ -215,7 +217,7 @@ stream(model, context, model.api === "anthropic-messages" ? { ...options, sessio
 				execute: (args: { path: string; edits: { oldText: string; newText: string }[] }) => this.#fx(Effect.gen(function* () {
 					const box = yield* Box;
 					return yield* Effect.tryPromise({ try: () => files.edit((c, i, t) => Effect.runPromise(box.exec(c, i, t)), (p, b) => Effect.runPromise(box.write(p, b)), args), catch: (e) => e as Error });
-				})),
+				}).pipe(Effect.provide(BoxLive(ns, box)))),
 			},
 			{
 				name: "write",
@@ -224,8 +226,11 @@ stream(model, context, model.api === "anthropic-messages" ? { ...options, sessio
 				execute: (args: { path: string; content: string }) => this.#fx(Effect.gen(function* () {
 					const box = yield* Box;
 					return yield* Effect.tryPromise({ try: () => files.write((p, b) => Effect.runPromise(box.write(p, b)), args), catch: (e) => e as Error });
-				})),
+				}).pipe(Effect.provide(BoxLive(ns, box)))),
 			},
+		];
+		const nested: Nested[] = [
+			...boxTools("main"),
 			{
 				name: "secrets",
 				description: `Your secrets (API keys, tokens, passwords): [{ name, why, set, expires }]. You never see values: each one is an env var ($NAME) in every tools.bash command, and any value printed comes back as [secret NAME]. Use them in place (curl -H "Authorization: Bearer $GITHUB_TOKEN" ...); never write them to files in /workspace, which is pushed to git.
@@ -299,8 +304,9 @@ A valid callback comes to you as a "[devin <id> done|blocked|failed]" message wi
 		const agentDoc: Nested = {
 			name: "agent",
 			description: `Start a subagent on a task and get its result. It runs on your model with all your tools (except agent and agents), sees your current VIEW as context, and does only the task. Its work stays out of your memory. Run several with Promise.all.
+Each subagent has its own box, copied from your box's last snapshot (same files, installs and browser logins), so they never collide. Its /workspace commits merge into workspace main when it replies, and show up in your /workspace on your next bash call; a conflict it can't fix stays on branch agent-<id>.
 With no schema it resolves to its reply as a string. With schema (a JSON Schema) it resolves to a parsed object matching it, for use in code.
-With computer: true it runs on GPT-6.1 Sol with a browser too: a real Chromium in your box that keeps its logins between tasks and signs in with the user's Bitwarden passwords, TOTP codes and passkeys. Use it for anything done on a website. They share one browser, so run one at a time. A browser task takes minutes, longer than a foreground script may run, so start it in a background codemode job (timeout 1800) and steer or check it with tools.agents.
+With computer: true it runs on GPT-6.1 Sol with a browser too: a real Chromium in your box that keeps its logins between tasks and signs in with the user's Bitwarden passwords, TOTP codes and passkeys. Use it for anything done on a website.  A browser task takes minutes, longer than a foreground script may run, so start it in a background codemode job (timeout 1800) and steer or check it with tools.agents.
 Example: const r = await tools.agent({ task: "Find every open PR in repo X that touches billing", schema: { type: "array", items: { type: "object", properties: { url: { type: "string" }, why: { type: "string" } }, required: ["url", "why"] } } });`,
 			inputSchema: Type.Object({ task: Type.String(), schema: Type.Optional(Type.Unknown()), computer: Type.Optional(Type.Boolean()) }),
 			execute: () => Promise.reject(new Error("unbound")),
@@ -324,8 +330,13 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				return (yield* jobs.list()).reverse().map(({ code: _, from: __, ...j }) => j);
 			})),
 		});
-		this.#tools = (scope, owner) => nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(scope, owner) } : t === agentsDoc ? { ...t, execute: this.#agents(owner) }
-			: t === messageDoc ? { ...t, execute: this.#message(owner?.api.conversationId === this.root.id) } : t));
+		const boxed = new Map<string, Map<string, Nested>>();
+		this.#tools = (scope, owner) => {
+			const box = owner ? this.#boxOf(owner.api.conversationId) : "main";
+			const own = box === "main" ? undefined : boxed.get(box) ?? boxed.set(box, new Map(boxTools(box).map((t) => [t.name, t]))).get(box)!;
+			return nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(scope, owner) } : t === agentsDoc ? { ...t, execute: this.#agents(owner) } 
+				: t === messageDoc ? { ...t, execute: this.#message(owner?.api.conversationId === this.root.id) } : own?.get(t.name) ?? t));
+		};
 		this.#app = executor.app;
 		this.#prompt = `# System prompt\n\n${system}\n\n# codemode tool description\n\n${describe(nested)}\n`;
 		const registry = createRegistry();
@@ -336,9 +347,9 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			tools: [defineTool({
 				name: "browser", replay: "unsafe", description: BROWSER,
 				parameters: Type.Object({ code: Type.String({ description: "JavaScript, run as an async function body." }), timeout: Type.Optional(Type.Integer({ description: "Seconds, default 60, max 600." })) }),
-				execute: async ({ code, timeout }) => {
+				execute: async ({ code, timeout }, api) => {
 					const env = await fx(Effect.flatMap(Secrets, (s) => s.env()));
-					const r = await fx(browse(code, Math.min(timeout ?? 60, 600), env));
+					const r = await fx(browse(code, Math.min(timeout ?? 60, 600), env).pipe(Effect.provide(BoxLive(ns, this.#boxOf(api.conversationId)))));
 					return {
 						content: [{ type: "text", text: redact(env, `${r.out || "(no output)"}\n\ntabs (* is page):\n${r.tabs}`) }, ...r.images.map((data) => ({ type: "image" as const, mimeType: "image/jpeg", data }))],
 						isError: r.error,
@@ -548,7 +559,13 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				await (await child.submit({ type: "input", content, requestId }, ctx)).wait(ctx);
 				const page = await (await conv(id)).entries({}, 3, undefined, C);
 				for (const e of page.items) for (const m of e.model ?? []) if (m.role === "assistant" && m.usage) console.log("agent usage", JSON.stringify({ agent: id, input: m.usage.input, cacheRead: m.usage.cacheRead, cacheWrite: m.usage.cacheWrite, output: m.usage.output }));
-				return host.last(id);
+				// Its box's work goes into workspace main; on a conflict it gets two tries to fix it itself.
+				for (let k = 0; ; k++) {
+					const why = await this.env.BOX.getByName(this.#boxOf(id)).merge();
+					if (!why) { await this.env.BOX.getByName("main").pull(); return host.last(id); }
+					if (k === 2) return `${await host.last(id)}\n\n[subagent ${id}'s work couldn't be merged into /workspace; it's on branch ${this.#boxOf(id)}: ${why}]`;
+					await (await child.submit({ type: "input", content: `Your /workspace commits couldn't be merged into workspace main:\n${why}\nRun git rebase origin/main in /workspace, resolve the conflicts and commit, then give your result again exactly as before.`, requestId: `${requestId}:merge${k}` }, ctx)).wait(ctx);
+				}
 			},
 			last: async (id) => {
 				const page = await (await conv(id)).entries({}, 50, undefined, C);
@@ -568,6 +585,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		};
 		return host;
 	}
+
+	#boxOf(conv: unknown) { return conv === this.root.id ? "main" : `agent-${conv}`; }
 
 	/** `tools.agent`: a child conversation keyed by the script's call id, so a thawed script finds it again. */
 	#agent(scope: string, owner?: { api: ToolExecutionApi; ctx: Context }) {

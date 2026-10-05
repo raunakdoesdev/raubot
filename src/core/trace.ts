@@ -70,6 +70,7 @@ export class Tracer {
 		const hooks: Hooks = {
 			call: (id, name, args) => {
 				if (byId.has(id)) return; // re-issued after a thaw
+				if (name === "__sleep") return; // setTimeout: waiting, not a call
 				let n = name, a = args;
 				if (name === "__app") { const x = args as { path: string[]; args: unknown }; n = appName(x.path); a = x.args; }
 				head.calls++;

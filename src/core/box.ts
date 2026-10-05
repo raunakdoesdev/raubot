@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { CAP } from "./prompts.ts";
 
-type Env = { ARTIFACTS: Artifacts; CF_DEPLOY_TOKEN: string; SPECTRUM_PROJECT_ID: string; SPECTRUM_PROJECT_SECRET: string };
+type Env = { BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; CF_DEPLOY_TOKEN: string; SPECTRUM_PROJECT_ID: string; SPECTRUM_PROJECT_SECRET: string };
 
 const ACCOUNT = "fadf1a80d9469afc81af5899893cd853";
 
@@ -28,7 +28,17 @@ mkdir -p /scratch
 [ -z "$FRESH" ] || [ ! -f setup.sh ] || bash setup.sh`;
 
 /** Files over 10 MB are kept out of git (Artifacts caps files at 32 MB); snapshots keep them. */
-const SAVE = `git ls-files -oz --exclude-standard | xargs -0 -r sh -c 'find "$@" -maxdepth 0 -size +10M' _ >> .gitignore; git add -A && { git diff --cached --quiet || git commit -qm "$MSG"; } && { git push -q origin HEAD:main 2>&1 || git pull -q --rebase origin main && git push -q origin HEAD:main; }`;
+const COMMIT = `git ls-files -oz --exclude-standard | xargs -0 -r sh -c 'find "$@" -maxdepth 0 -size +10M' _ >> .gitignore; git add -A && { git diff --cached --quiet || git commit -qm "$MSG"; }`;
+/** The main box pulls first, so subagents' merged work shows up in /workspace. */
+const SAVE = `${COMMIT} && git pull -q --rebase origin main 2>&1 && git push -q origin HEAD:main 2>&1`;
+
+/** A subagent's box (agent-<id>) works on its own branch, pushed after every command and merged into main when it replies. */
+const SAVE_AGENT = `${COMMIT} && git push -q -f origin HEAD:refs/heads/$BRANCH 2>&1`;
+const SYNC = `git checkout -q -B "$BRANCH" && git fetch -q origin main && { git rebase -q origin/main >/dev/null 2>&1 || { git rebase --abort; echo "[couldn't rebase $BRANCH onto workspace main]"; }; }`;
+const MERGE = `for i in 1 2 3; do
+git fetch -q origin main && git rebase -q origin/main >/dev/null 2>&1 || { echo "conflicts with workspace main in:"; git diff --name-only --diff-filter=U; git rebase --abort; exit 1; }
+git push -q origin HEAD:main 2>&1 && exit 0
+done; exit 1`;
 
 /** /scratch is for big throwaway files: never in git, emptied before the box stops. */
 const WIPE = "rm -rf /scratch/* /scratch/.[!.]*";
@@ -44,6 +54,17 @@ export class Computer extends DurableObject<Env> {
 	#note = "";
 	#env: Record<string, string> = {};
 	#busy = 0;
+	#git: Promise<unknown> = Promise.resolve();
+
+	/** "agent-<id>" for a subagent's box, undefined for raubot's own. */
+	get #agent() { const n = this.ctx.id.name; return n && n !== "main" ? n : undefined; }
+
+	/** Git runs one at a time per box, so parallel commands don't collide on index.lock. */
+	#serial<T>(f: () => Promise<T>) {
+		const p = this.#git.then(f);
+		this.#git = p.catch(() => {});
+		return p;
+	}
 
 	async #run(cmd: string, ms: number, env?: Record<string, string>) {
 		using t = deadline(ms);
@@ -70,12 +91,15 @@ export class Computer extends DurableObject<Env> {
 				SPECTRUM_PROJECT_ID: this.env.SPECTRUM_PROJECT_ID,
 				SPECTRUM_PROJECT_SECRET: this.env.SPECTRUM_PROJECT_SECRET,
 				CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+				...(this.#agent ? { BRANCH: this.#agent } : {}),
 			});
 			const image = c.images.box;
-			const snap = await this.ctx.storage.get<{ id: string; image: string }>("snapshot");
+			const own = await this.ctx.storage.get<{ id: string; image: string }>("snapshot");
+			// A new subagent box starts as a copy of raubot's box: its last snapshot.
+			const snap = own ?? (this.#agent && !c.running ? (await (this.env.BOX.getByName("main") as unknown as { status(): Promise<{ snapshot?: typeof own }> }).status()).snapshot : undefined);
 			const restore = !c.running && snap?.image === image;
 			const fresh = !c.running && !restore;
-			console.log("box boot", JSON.stringify({ running: c.running, restore, fresh }));
+			console.log("box boot", JSON.stringify({ box: this.ctx.id.name, running: c.running, restore, fork: restore && !own, fresh }));
 			if (!c.running) {
 				c.start({ ...(restore ? { containerSnapshot: { id: snap.id } } : { image }), instance: "standard-1", enableInternet: true, env });
 				await this.ctx.storage.put("saved", Date.now());
@@ -84,7 +108,7 @@ export class Computer extends DurableObject<Env> {
 				try { await this.#run("true", 10_000); break; } catch (e) {
 					console.log("box exec not ready", JSON.stringify({ i, running: c.running, restore, error: String(e) }));
 					if (i > 60) {
-						if (restore) await this.ctx.storage.delete("snapshot");
+						if (restore && own) await this.ctx.storage.delete("snapshot");
 						throw e;
 					}
 					await new Promise((r) => setTimeout(r, 1000));
@@ -94,6 +118,7 @@ export class Computer extends DurableObject<Env> {
 			if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + TICK);
 			const r = await this.#run(SETUP, 900_000, fresh ? { FRESH: "1" } : {});
 			this.#note = r.exitCode ? `[box setup failed]\n${r.out}\n` : "";
+			if (this.#agent) this.#note += (await this.#serial(() => this.#run(SYNC, 120_000))).out;
 		})().catch((e) => { this.#ready = undefined; throw e; }));
 	}
 
@@ -104,7 +129,7 @@ export class Computer extends DurableObject<Env> {
 			await this.#boot();
 			await this.ctx.storage.put("last", Date.now());
 			const { out, exitCode } = await this.#run(cmd, seconds * 1000, env);
-			const save = await this.#run(SAVE, 60_000, { MSG: cmd.split("\n")[0].slice(0, 72) });
+			const save = await this.#serial(() => this.#run(this.#agent ? SAVE_AGENT : SAVE, 60_000, { MSG: cmd.split("\n")[0].slice(0, 72) }));
 			const note = this.#note + (save.exitCode ? `\n[autosave failed]\n${save.out}` : "");
 			this.#note = "";
 			return clip(`${note}${out}\n[exit ${exitCode}]`);
@@ -142,6 +167,31 @@ export class Computer extends DurableObject<Env> {
 		const p = await this.ctx.container!.exec(["bash", "-c", 'mkdir -p "$(dirname "$F")" && cat > "$F"'], { cwd: "/workspace", stdin: new Blob([bytes]).stream(), stderr: "combined", env: { ...this.#env, F: path }, signal: t.signal });
 		const { stdout, exitCode } = await p.output();
 		if (exitCode) throw new Error(`write ${path}: ${new TextDecoder().decode(stdout)}`);
+	}
+
+	/** Subagent box: commit and merge its branch into workspace main. "" when merged (or never used), else why not. */
+	async merge() {
+		if (!this.#agent || !(await this.ctx.storage.get("last"))) return "";
+		this.#busy++;
+		try {
+			await this.#boot();
+			const r = await this.#serial(async () => {
+				await this.#run(SAVE_AGENT, 60_000, { MSG: "subagent reply" });
+				return this.#run(MERGE, 120_000);
+			});
+			console.log("box merge", JSON.stringify({ box: this.#agent, exit: r.exitCode }));
+			return r.exitCode ? r.out.trim() || "merge failed" : "";
+		} finally {
+			this.#busy--;
+			await this.ctx.storage.put("last", Date.now());
+		}
+	}
+
+	/** raubot's box: pull subagents' merged work into /workspace now, if it's up. */
+	async pull() {
+		if (this.#agent || !this.ctx.container!.running) return;
+		await this.#boot();
+		await this.#serial(() => this.#run(`${COMMIT} && git pull -q --rebase origin main 2>&1`, 60_000, { MSG: "before pulling subagent work" }));
 	}
 
 	async #snapshot() {

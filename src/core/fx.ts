@@ -22,17 +22,17 @@ export class Box extends Context.Tag("Box")<Box, {
 	exec(cmd: string, stdin: string, timeout: number, env?: Record<string, string>): Effect.Effect<{ out: string; err: string; exitCode: number }, BoxError>;
 }>() {}
 
-export const BoxLive = (ns: DurableObjectNamespace<Computer>) => Layer.succeed(Box, {
+export const BoxLive = (ns: DurableObjectNamespace<Computer>, name = "main") => Layer.succeed(Box, {
 	bash: (cmd, timeout, env) => Effect.tryPromise({
-		try: () => ns.getByName("main").bash(cmd, timeout, env) as Promise<string>,
+		try: () => ns.getByName(name).bash(cmd, timeout, env) as Promise<string>,
 		catch: (e) => new BoxError({ message: String(e) }),
 	}),
 	write: (path, bytes) => Effect.tryPromise({
-		try: () => ns.getByName("main").write(path, bytes),
+		try: () => ns.getByName(name).write(path, bytes),
 		catch: (e) => new BoxError({ message: String(e) }),
 	}),
 	exec: (cmd, stdin, timeout, env) => Effect.tryPromise({
-		try: () => ns.getByName("main").exec(cmd, stdin, timeout, env) as Promise<{ out: string; err: string; exitCode: number }>,
+		try: () => ns.getByName(name).exec(cmd, stdin, timeout, env) as Promise<{ out: string; err: string; exitCode: number }>,
 		catch: (e) => new BoxError({ message: String(e) }),
 	}),
 });
