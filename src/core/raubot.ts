@@ -781,7 +781,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	async alarm() {
 		this.memory.pump();
-		for (const c of await this.#fx(cron.due(Date.now()))) await this.#fire(c).catch((e) => console.error("cron", c.id, e));
+		for (const c of await this.#fx(cron.due(Date.now()))) await this.#fire(c).catch((e) => this.#fx(cron.record(c.id, `failed to start: ${String(e).slice(0, 200)}`)));
 		const busy = (await this.#fx(Effect.flatMap(Jobs, (j) => j.resume()))) || this.memory.pending();
 		await this.#arm(busy ? Date.now() + 30_000 : Infinity);
 	}
