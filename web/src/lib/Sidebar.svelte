@@ -20,7 +20,10 @@
 	async function poll() {
 		try {
 			const r = await fetch("/agents.json");
-			if (!r.ok) { err = `couldn't load subagents (HTTP ${r.status}), retrying`; return; }
+			if (!r.ok) {
+				const e = await r.json().then((j) => (typeof j?.error === "string" ? j.error : "")).catch(() => "");
+				err = `couldn't load subagents (${e ? e.slice(0, 120) : `HTTP ${r.status}`}), retrying`; return;
+			}
 			const d = await r.json().catch(() => undefined);
 			if (!d || !Array.isArray(d.agents)) { err = "couldn't load subagents, retrying"; return; }
 			agents = d.agents; jobs = Array.isArray(d.jobs) ? d.jobs : jobs; err = "";
