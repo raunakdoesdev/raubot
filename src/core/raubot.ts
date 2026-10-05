@@ -213,7 +213,7 @@ Example: find the Slack messages that need the user's attention.
 			name: "agent",
 			description: `Start a subagent on a task and get its result. It runs on your model with all your tools (except agent and agents), sees your current VIEW as context, and does only the task. Its work stays out of your memory. Run several with Promise.all.
 With no schema it resolves to its reply as a string. With schema (a JSON Schema) it resolves to a parsed object matching it, for use in code.
-With computer: true it runs on GPT-6.1 Sol with a browser too: a real Chromium in your box that keeps its logins between tasks and signs in with the user's Bitwarden passwords, TOTP codes and passkeys. Use it for anything done on a website. They share one browser, so run one at a time.
+With computer: true it runs on GPT-6.1 Sol with a browser too: a real Chromium in your box that keeps its logins between tasks and signs in with the user's Bitwarden passwords, TOTP codes and passkeys. Use it for anything done on a website. They share one browser, so run one at a time. A browser task takes minutes, longer than a foreground script may run, so start it in a background codemode job (timeout 1800) and steer or check it with tools.agents.
 Example: const r = await tools.agent({ task: "Find every open PR in repo X that touches billing", schema: { type: "array", items: { type: "object", properties: { url: { type: "string" }, why: { type: "string" } }, required: ["url", "why"] } } });`,
 			inputSchema: Type.Object({ task: Type.String(), schema: Type.Optional(Type.Unknown()), computer: Type.Optional(Type.Boolean()) }),
 			execute: () => Promise.reject(new Error("unbound")),
