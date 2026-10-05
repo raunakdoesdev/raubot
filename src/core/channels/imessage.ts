@@ -32,7 +32,7 @@ flock /tmp/imessage.lock sh -c 'git -C raubot fetch -q && git -C raubot checkout
 /** iMessage through Photon's Spectrum. Its SDK is gRPC, which Workers can't speak, so the box runs its actions. */
 export const imessage = (secret: string): Channel => ({
 	name: "imessage",
-	style: "a text message: keep the reply short, in plain text with no markdown.",
+	style: "a text message: keep the reply short. Markdown is converted to iMessage styling, so use only **bold**, _italic_, ~~strikethrough~~, `code` (shown in a monospace font), - bullets, 1. numbered lists and > quotes. Headings come out as bold lines, links as text (url) and tables as rows split by |. Never send long code blocks.",
 	receive: (req) => Effect.gen(function* () {
 		const body = yield* Effect.promise(() => req.text());
 		if (!(yield* signed(secret, req.headers, body))) return yield* new ChannelError({ message: "bad signature", status: 401 });

@@ -24,6 +24,7 @@ git -C raubot remote set-url origin "$RAUBOT_REMOTE"
 git -C raubot pull -q --ff-only 2>/dev/null || true
 (cd raubot && [ -d node_modules ] || npm ci --silent --no-audit --no-fund)
 mkdir -p /scratch
+(cd raubot/browser 2>/dev/null && { [ -d node_modules ] || npm i -s --no-audit --no-fund; } && ln -sf "$PWD/vault" /usr/local/bin/vault) || true
 [ -z "$FRESH" ] || [ ! -f setup.sh ] || bash setup.sh`;
 
 /** Files over 10 MB are kept out of git (Artifacts caps files at 32 MB); snapshots keep them. */
@@ -100,6 +101,22 @@ export class Computer extends DurableObject<Env> {
 			return clip(`${note}${out}\n[exit ${exitCode}]`);
 		} catch (e) {
 			return clip(`error: ${e instanceof Error ? e.message : String(e)}`);
+		} finally {
+			this.#busy--;
+			await this.ctx.storage.put("last", Date.now());
+		}
+	}
+
+	/** Runs `cmd` with `stdin`, keeping stdout and stderr apart; nothing is clipped or committed. */
+	async exec(cmd: string, stdin: string, seconds: number, env?: Record<string, string>) {
+		this.#busy++;
+		try {
+			await this.#boot();
+			await this.ctx.storage.put("last", Date.now());
+			const p = await this.ctx.container!.exec(["bash", "-lc", cmd], { cwd: "/workspace", stdin: new Blob([stdin]).stream(), stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(seconds * 1000), env: { ...this.#env, ...env } });
+			const { stdout, stderr, exitCode } = await p.output();
+			const d = new TextDecoder();
+			return { out: d.decode(stdout), err: d.decode(stderr), exitCode };
 		} finally {
 			this.#busy--;
 			await this.ctx.storage.put("last", Date.now());

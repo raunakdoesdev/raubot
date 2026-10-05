@@ -7,7 +7,7 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import type { Message } from "@earendil-works/pi-ai";
 import {
-	type Conversation, type ConversationView, createRegistry, defineExtension, defineTool, GenerationTask, Harness,
+	type Conversation, type ConversationView, createRegistry, type Extension, defineExtension, defineTool, GenerationTask, Harness,
 	hook, section,
 } from "@earendil-works/pi-durable";
 import { configure, type EntryId, type ToolExecutionApi } from "@earendil-works/pi-durable";
@@ -16,14 +16,15 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
-import { EXECUTOR, MARKS, MASTER, SELF, SUBAGENT, VIEW, VIEW_DOC } from "./prompts.ts";
+import { BROWSER, COMPUTER, EXECUTOR, MARKS, MASTER, SELF, SUBAGENT, VIEW, VIEW_DOC } from "./prompts.ts";
+import { browse, responses } from "./computer.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Computer } from "./box.ts";
 import { type App, codemode, describe, type Freezer, type Nested } from "./codemode.ts";
 import { Mcp } from "./mcp.ts";
 import { serve } from "../app/index.ts";
 import type { Core, CoreEvent } from "./api.ts";
-import { agent, type AgentHost } from "./agents.ts";
+import { agent, agents, type AgentHost } from "./agents.ts";
 import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, acknowledge, idle, send as deliver, tag, uploadName, uploads } from "./channels/index.ts";
 import * as frozen from "./freezer.ts";
 import { bash, Box, BoxLive, runner, Storage, write } from "./fx.ts";
@@ -34,6 +35,18 @@ import { redact, Secrets, SecretsLive } from "./secrets.ts";
 type Env = { SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
 
 type Services = Storage | Box | Jobs | JobHost | Secrets;
+
+const SOL = { provider: "openai", modelId: "gpt-6.1-sol" };
+
+/** Clef questions for a subagent reply: is it stopping for a confirmation, and would that be one of the two the user wants? */
+const CONFIRM = {
+	asks: { type: "noul", instructions: "Does this message stop to ask for permission, approval or confirmation before going on with the task (as opposed to reporting a result, or asking for information it can't get)?" },
+	about: { type: "choice", instructions: "What would the action it asks about do?", criteria: {
+		money: "Spend or move money: buy, pay, order, subscribe, tip, donate or transfer funds",
+		share: "Share the user's personal information or data with an outside person or company the task didn't name",
+		other: "Anything else: log in, solve a captcha, accept cookies or terms, submit a form, change a setting, delete something, download, send a message the task asked for",
+	} },
+};
 
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
@@ -138,7 +151,8 @@ export class Raubot extends DurableObject<Env> implements Core {
 		models.setProvider(openrouterProvider());
 		const stream = models.streamSimple.bind(models);
 		models.streamSimple = (model, context, options) =>
-			stream(model, context, model.api === "anthropic-messages" ? { ...options, onPayload: (p: unknown) => withSearch(model.provider, markView(this.#marks)(p) ?? (p as AnthropicPayload)) } : options);
+			stream(model, context, model.api === "anthropic-messages" ? { ...options, onPayload: (p: unknown) => withSearch(model.provider, markView(this.#marks)(p) ?? (p as AnthropicPayload)) }
+				: model.api === "openai-responses" ? { ...options, onPayload: responses } : options);
 		const compactor = models.getModel("openrouter", this.env.COMPACT_MODEL)!;
 		this.memory = new Memory(this.ctx.storage.sql, async (systemPrompt, prompt) => {
 			const r = await models.completeSimple(compactor, { systemPrompt, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, { reasoning: "low" });
@@ -197,14 +211,22 @@ Example: find the Slack messages that need the user's attention.
 		];
 		const agentDoc: Nested = {
 			name: "agent",
-			description: `Start a subagent on a task and get its result. It runs on your model with all your tools (except agent), sees your current VIEW as context, and does only the task. Its work stays out of your memory. Run several with Promise.all.
+			description: `Start a subagent on a task and get its result. It runs on your model with all your tools (except agent and agents), sees your current VIEW as context, and does only the task. Its work stays out of your memory. Run several with Promise.all.
 With no schema it resolves to its reply as a string. With schema (a JSON Schema) it resolves to a parsed object matching it, for use in code.
+With computer: true it runs on GPT-6.1 Sol with a browser too: a real Chromium in your box that keeps its logins between tasks and signs in with the user's Bitwarden passwords, TOTP codes and passkeys. Use it for anything done on a website. They share one browser, so run one at a time.
 Example: const r = await tools.agent({ task: "Find every open PR in repo X that touches billing", schema: { type: "array", items: { type: "object", properties: { url: { type: "string" }, why: { type: "string" } }, required: ["url", "why"] } } });`,
-			inputSchema: Type.Object({ task: Type.String(), schema: Type.Optional(Type.Unknown()) }),
+			inputSchema: Type.Object({ task: Type.String(), schema: Type.Optional(Type.Unknown()), computer: Type.Optional(Type.Boolean()) }),
+			execute: () => Promise.reject(new Error("unbound")),
+		};
+		const agentsDoc: Nested = {
+			name: "agents",
+			description: `Your subagents, newest first: [{ id, task, computer, status: "running" | "idle", started, last }], last being the end of its latest output. Works across turns and from background jobs.
+\`send: { id, message }\` talks to one: a running subagent reads it at its next step (resolves at once); an idle one answers it as a follow-up and this resolves to its reply. \`stop: [ids]\` stops running ones.`,
+			inputSchema: Type.Object({ send: Type.Optional(Type.Object({ id: Type.Integer(), message: Type.String() })), stop: Type.Optional(Type.Array(Type.Integer())) }),
 			execute: () => Promise.reject(new Error("unbound")),
 		};
 		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
-		nested.push(agentDoc, {
+		nested.push(agentDoc, agentsDoc, {
 			name: "jobs",
 			description: "Your background jobs, newest first: { id, label, status, started, ended, deadline }. `cancel: [ids]` stops running ones (no result comes back); `prune: true` forgets finished ones.",
 			inputSchema: Type.Object({ cancel: Type.Optional(Type.Array(Type.Integer())), prune: Type.Optional(Type.Boolean()) }),
@@ -215,11 +237,29 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				return (yield* jobs.list()).reverse().map(({ code: _, from: __, ...j }) => j);
 			})),
 		});
-		this.#tools = (scope, owner) => nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(scope, owner) } : t));
+		this.#tools = (scope, owner) => nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(scope, owner) } : t === agentsDoc ? { ...t, execute: this.#agents(owner) } : t));
 		this.#app = executor.app;
 		this.#prompt = `# System prompt\n\n${system}\n\n# codemode tool description\n\n${describe(nested)}\n`;
 		const registry = createRegistry();
-		registry.install(defineExtension({
+		const fx = this.#fx;
+		this.#computer = defineExtension({
+			name: "computer",
+			sections: [section("computer", () => COMPUTER, { tag: false })],
+			tools: [defineTool({
+				name: "browser", replay: "unsafe", description: BROWSER,
+				parameters: Type.Object({ code: Type.String({ description: "JavaScript, run as an async function body." }), timeout: Type.Optional(Type.Integer({ description: "Seconds, default 60, max 600." })) }),
+				execute: async ({ code, timeout }) => {
+					const env = await fx(Effect.flatMap(Secrets, (s) => s.env()));
+					const r = await fx(browse(code, Math.min(timeout ?? 60, 600), env));
+					return {
+						content: [{ type: "text", text: redact(env, `${r.out || "(no output)"}\n\ntabs (* is page):\n${r.tabs}`) }, ...r.images.map((data) => ({ type: "image" as const, mimeType: "image/jpeg", data }))],
+						isError: r.error,
+					};
+				},
+			})],
+		});
+		registry.install(this.#computer);
+		const raubot = defineExtension({
 			name: "raubot",
 			sections: [section("raubot", () => system, { tag: false })],
 			tools: [defineTool({
@@ -257,10 +297,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 					return { messages: messages.with(at, { ...first, content: [...out.map((text) => ({ type: "text" as const, text })), ...body] }) };
 				},
 			})],
-		}));
+		});
+		registry.install(raubot);
 
 		const storage = await SqliteStorage.open(new DoSqlite(this.ctx.storage));
-		this.harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false } } }, C);
+		this.harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false }, extensions: [raubot] } }, C);
 		this.root = await this.harness.root(C, {
 			agent: { model: { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium" },
 		});
@@ -388,30 +429,65 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		};
 	}
 
-	/** `tools.agent`: a child conversation keyed by the script's call id, so a thawed script finds it again. A foreground call owns its children (Esc stops them); a background job's are ownerless. */
-	#agent(scope: string, owner?: { api: ToolExecutionApi; ctx: Context }) {
+	/** Subagents: a foreground call owns its children (Esc stops them); a background job's are ownerless. Computer ones run on GPT-6.1 Sol with the browser. */
+	#host(owner?: { api: ToolExecutionApi; ctx: Context }): AgentHost {
 		const ctx = owner?.ctx ?? C;
+		const conv = async (id: number) => (await this.harness.conversation(id as never, C)) ?? Promise.reject(new Error(`No subagent ${id}.`));
+		const kind = (computer: boolean) => ({
+			model: computer ? SOL : { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium" as const, instructions: SUBAGENT,
+			...(computer ? { extensions: { add: [this.#computer] } } : {}),
+		});
 		const host: AgentHost = {
-			create: async () => (owner
+			create: async (computer) => (owner
 				? await owner.api.commit(async (tx) => {
 					const c = await tx.createConversation({ ownership: { kind: "task", taskId: owner.api.taskId } });
-					await configure(tx, c.id, { instructions: SUBAGENT });
+					await configure(tx, c.id, kind(computer));
 					return c.id;
 				}, ctx)
-				: (await this.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium", instructions: SUBAGENT } }, C)).id) as unknown as number,
+				: (await this.harness.createConversation({ ownership: { kind: "ownerless" }, agent: kind(computer) }, C)).id) as unknown as number,
 			ask: async (id, content, requestId) => {
 				const child = (owner ? await owner.api.conversation(id as never, ctx) : await this.harness.conversation(id as never, C))!;
 				await (await child.submit({ type: "input", content, requestId }, ctx)).wait(ctx);
-				const page = await (await this.harness.conversation(id as never, C))!.entries({}, 50, undefined, C);
+				return host.last(id);
+			},
+			last: async (id) => {
+				const page = await (await conv(id)).entries({}, 50, undefined, C);
 				for (const e of page.items) for (const m of [...(e.model ?? [])].reverse()) if (m.role === "assistant") { const t = text(m.content); if (t) return t; }
 				return "";
 			},
+			running: async (id) => {
+				const s = await (await conv(id)).viewState(C);
+				try { return (s.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; } finally { s.dispose(); }
+			},
+			steer: async (id, message) => void (await (await conv(id)).submit({ type: "input", content: message, whenBusy: "steer" }, C)),
+			stop: async (id) => (await conv(id)).abort(C),
+			needless: async (reply) => {
+				const r = await this.env.AI.run("@cf/cloudflare/clef" as keyof AiModels, { model: "clef", state: reply.slice(-4000), questions: CONFIRM } as never) as unknown as { answers: { asks: { noul: number }; about: { choice: string } } };
+				return r.answers.asks.noul > 0.5 && r.answers.about.choice === "other";
+			},
 		};
-		return (args: { task: string; schema?: object }, call: number) => {
+		return host;
+	}
+
+	/** `tools.agent`: a child conversation keyed by the script's call id, so a thawed script finds it again. */
+	#agent(scope: string, owner?: { api: ToolExecutionApi; ctx: Context }) {
+		const host = this.#host(owner);
+		return (args: { task: string; schema?: object; computer?: boolean }, call: number) => {
 			if (owner && owner.api.conversationId !== this.root.id) return Promise.reject(new Error("A subagent can't start subagents."));
 			return this.#fx(agent(host, `agent:${scope}:${call}`, args));
 		};
 	}
+
+	/** `tools.agents`: raubot's view of every subagent, from any turn or job. */
+	#agents(owner?: { api: ToolExecutionApi; ctx: Context }) {
+		const host = this.#host();
+		return (args: { send?: { id: number; message: string }; stop?: number[] }) => {
+			if (owner && owner.api.conversationId !== this.root.id) return Promise.reject(new Error("Only raubot can talk to subagents."));
+			return this.#fx(agents(host, args));
+		};
+	}
+
+	#computer!: Extension;
 
 	#tools!: (scope: string, owner?: { api: ToolExecutionApi; ctx: Context }) => Nested[];
 	#app?: App;

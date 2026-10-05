@@ -19,6 +19,7 @@ export class BoxError extends Data.TaggedError("BoxError")<{ message: string }> 
 export class Box extends Context.Tag("Box")<Box, {
 	bash(cmd: string, timeout: number, env?: Record<string, string>): Effect.Effect<string, BoxError>;
 	write(path: string, bytes: Uint8Array): Effect.Effect<void, BoxError>;
+	exec(cmd: string, stdin: string, timeout: number, env?: Record<string, string>): Effect.Effect<{ out: string; err: string; exitCode: number }, BoxError>;
 }>() {}
 
 export const BoxLive = (ns: DurableObjectNamespace<Computer>) => Layer.succeed(Box, {
@@ -28,6 +29,10 @@ export const BoxLive = (ns: DurableObjectNamespace<Computer>) => Layer.succeed(B
 	}),
 	write: (path, bytes) => Effect.tryPromise({
 		try: () => ns.getByName("main").write(path, bytes),
+		catch: (e) => new BoxError({ message: String(e) }),
+	}),
+	exec: (cmd, stdin, timeout, env) => Effect.tryPromise({
+		try: () => ns.getByName("main").exec(cmd, stdin, timeout, env) as Promise<{ out: string; err: string; exitCode: number }>,
 		catch: (e) => new BoxError({ message: String(e) }),
 	}),
 });
