@@ -8,7 +8,16 @@ const code = ({ text, lang }: { text: string; lang?: string }) => {
 };
 
 marked.setOptions({ gfm: true, breaks: true });
-marked.use({ renderer: { code } });
+/** Chat images of box files load through /file and open the file panel on click. */
+const BOX = /^\/(?:workspace|scratch)\//;
+const attr = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+const image = ({ href, text }: { href: string; text: string }) => {
+	let p = href;
+	try { p = decodeURI(href); } catch {}
+	if (!BOX.test(p)) return `<img src="${attr(href)}" alt="${attr(text)}" loading="lazy">`;
+	return `<a href="#file=${encodeURIComponent(p)}" data-file="${attr(p)}" class="md-img"><img src="/file?path=${encodeURIComponent(p)}" alt="${attr(text)}" loading="lazy" decoding="async"></a>`;
+};
+marked.use({ renderer: { code, image } });
 
 /** Paths into the box that the file panel can open (not inside tags or existing links). */
 const PATH = /(?<![\w./-])(\/(?:workspace|scratch)\/[^\s<>"'`)\]&]*[^\s<>"'`)\]&.,;:!?])/g;

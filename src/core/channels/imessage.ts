@@ -1,6 +1,6 @@
 import { Effect } from "effect";
 import { bash, kv } from "../fx.ts";
-import { type Channel, ChannelError } from "./index.ts";
+import { type Channel, ChannelError, images } from "./index.ts";
 
 type Webhook = { message?: { id: string; space: { id: string }; content: { type: string; text?: string } } };
 
@@ -32,7 +32,7 @@ flock /tmp/imessage.lock sh -c 'git -C raubot fetch -q && git -C raubot checkout
 /** iMessage through Photon's Spectrum. Its SDK is gRPC, which Workers can't speak, so the box runs its actions. */
 export const imessage = (secret: string): Channel => ({
 	name: "imessage",
-	style: "a text message: keep the reply short. Markdown is converted to iMessage styling, so use only **bold**, _italic_, ~~strikethrough~~, `code` (shown in a monospace font), - bullets, 1. numbered lists and > quotes. Headings come out as bold lines, links as text (url) and tables as rows split by |. Never send long code blocks.",
+	style: "a text message: keep the reply short. Markdown is converted to iMessage styling (markdown images of box files go as real attachments), so use only **bold**, _italic_, ~~strikethrough~~, `code` (shown in a monospace font), - bullets, 1. numbered lists and > quotes. Headings come out as bold lines, links as text (url) and tables as rows split by |. Never send long code blocks.",
 	receive: (req) => Effect.gen(function* () {
 		const body = yield* Effect.promise(() => req.text());
 		if (!(yield* signed(secret, req.headers, body))) return yield* new ChannelError({ message: "bad signature", status: 401 });
@@ -45,7 +45,10 @@ export const imessage = (secret: string): Channel => ({
 			files: files ? (dir: string) => spectrum(m.space.id, { OP: "download", MSG: m.id, DIR: dir }).pipe(Effect.map((out) => JSON.parse(/^FILES (.*)$/m.exec(out)?.[1] ?? "[]") as string[])) : undefined,
 		}];
 	}),
-	send: (to, text) => Effect.asVoid(spectrum(to, { OP: "send", TEXT_B64: b64(text) })),
+	send: (to, text) => {
+		const m = images(text);
+		return Effect.asVoid(spectrum(to, { OP: "send", TEXT_B64: b64(m.text), ...(m.files.length ? { FILES: JSON.stringify(m.files) } : {}) }));
+	},
 	read: (m) => Effect.asVoid(spectrum(m.from.to, { OP: "read", MSG: m.id })),
 	typing: (to, on) => Effect.asVoid(spectrum(to, { OP: "typing", ON: on ? "1" : "0" })),
 	react: (m, emoji) => Effect.asVoid(spectrum(m.from.to, { OP: "react", MSG: m.id, EMOJI: emoji })),
