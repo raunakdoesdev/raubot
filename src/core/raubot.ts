@@ -84,7 +84,8 @@ const markView = (marks: number) => (payload: unknown) => {
 };
 
 /** OpenRouter runs web search server-side; the model calls it like any tool. */
-const withSearch = (provider: string, p: AnthropicPayload) => (provider === "openrouter" ? { ...p, tools: [...(p.tools ?? []), WEB_SEARCH] } : p);
+/** OpenRouter: server-side web search, and Anthropic first so every request of raubot and its subagents shares one prompt cache. */
+const withSearch = (provider: string, p: AnthropicPayload) => (provider === "openrouter" ? { ...p, tools: [...(p.tools ?? []), WEB_SEARCH], provider: { order: ["anthropic"], allow_fallbacks: true } } : p);
 
 export class Raubot extends DurableObject<Env> implements Core {
 	memory!: Memory;
