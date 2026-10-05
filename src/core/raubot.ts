@@ -92,6 +92,7 @@ export class Raubot extends DurableObject<Env> implements Core {
 	#listeners = new Set<(e: CoreEvent) => void>();
 	#lock: Promise<unknown> = Promise.resolve();
 	#partial = "";
+	#steering = "[]";
 	#delivering = false;
 	#marks = 0;
 	#prompt = "";
@@ -317,7 +318,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		registry.install(raubot);
 
 		const storage = await SqliteStorage.open(new DoSqlite(this.ctx.storage));
-		this.harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false }, extensions: [raubot] } }, C);
+		this.harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false }, steeringMode: "all", extensions: [raubot] } }, C);
 		this.root = await this.harness.root(C, {
 			agent: { model: { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium" },
 		});
@@ -326,6 +327,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			const msg = (view.docs["pi.live"] as { generation?: { message?: { content?: unknown } } } | undefined)?.generation?.message;
 			const partial = msg ? text(msg.content) : "";
 			if (partial !== this.#partial) this.#broadcast({ partial: (this.#partial = partial) });
+			const steering = JSON.stringify(this.#steers(view.docs));
+			if (steering !== this.#steering) this.#broadcast({ steering: JSON.parse((this.#steering = steering)) });
 			await this.#sync();
 			void this.#deliver().catch((e) => console.error("deliver", e));
 		});
@@ -572,6 +575,12 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		void this.#drain().catch((e) => this.#broadcast({ error: String(e) }));
 	}
 
+	/** Inputs pi holds for the running turn's next step: shown in the app until they land in the log. */
+	#steers(docs: Record<string, unknown>) {
+		const items = (docs["pi.inbox"] as { items?: { mode: string; content?: unknown }[] } | undefined)?.items ?? [];
+		return items.flatMap((x) => (x.mode === "write" ? [] : [text(x.content)]));
+	}
+
 	async #queued() { return (await this.ctx.storage.get<string[]>("inbox")) ?? []; }
 
 	/** Starts a turn for the saved inbox, waiting briefly for summaries; unfinished view lines go in as "(summarizing...)". */
@@ -663,7 +672,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	async snapshot() {
 		const asks = (await this.#fx(Effect.flatMap(Secrets, (s) => s.asks()))).map(({ token, name, why }) => ({ token, name, why }));
-		return { history: this.memory.log.slice(-200), busy: this.busy(), pending: this.memory.pending(), asks, queued: await this.#queued() };
+		return { history: this.memory.log.slice(-200), busy: this.busy(), pending: this.memory.pending(), asks, queued: await this.#queued(), steering: this.#steers(this.state.value.docs) };
 	}
 
 	stop() { return this.root.abort(C); }

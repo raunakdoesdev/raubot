@@ -20,7 +20,20 @@ export const linkPaths = (html: string) => {
 	}).join("");
 };
 
-export const md = (s: string) => linkPaths(marked.parse(s ?? "", { async: false }));
+// Rows scrolling back into view re-render their text; parse each finished text once.
+const cache = new Map<string, string>();
+export const md = (s: string) => {
+	s ??= "";
+	let h = cache.get(s);
+	if (h === undefined) {
+		h = linkPaths(marked.parse(s, { async: false }));
+		cache.set(s, h);
+		if (cache.size > 500) cache.delete(cache.keys().next().value!);
+	}
+	return h;
+};
+/** Streaming text changes every frame: parsed fresh, not cached. */
+export const mdLive = (s: string) => linkPaths(marked.parse(s ?? "", { async: false }));
 
 /** Documents (files): no chat-style line breaks, and raw HTML is shown as text, never run. */
 const docs = new Marked({ gfm: true });

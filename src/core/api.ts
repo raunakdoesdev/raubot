@@ -7,7 +7,7 @@ import type { TraceCall, TraceRun } from "./trace.ts";
 export type SecretAsk = { token: string; name: string; why: string };
 
 /** What the core streams to clients: new log lines, the reply being generated, and status. */
-export type CoreEvent = { asks?: SecretAsk[]; history?: Msg[]; partial?: string; queued?: string[]; status?: string; log?: number; pending?: boolean; busy?: boolean; error?: string };
+export type CoreEvent = { asks?: SecretAsk[]; history?: Msg[]; partial?: string; queued?: string[]; steering?: string[]; status?: string; log?: number; pending?: boolean; busy?: boolean; error?: string };
 
 /** A subagent as the app lists it (like `tools.agents`). */
 export type AgentRow = { id: number; task: string; computer: boolean; status: "running" | "idle"; started: string; last: string };

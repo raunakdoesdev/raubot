@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick } from "svelte";
-	import { ArrowUp, ChevronRight, PanelLeft, Paperclip, Settings, Square, X } from "@lucide/svelte";
+	import { ArrowDown, ArrowUp, ChevronRight, PanelLeft, Paperclip, Settings, Square, X } from "@lucide/svelte";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import ToolRow from "$lib/ToolRow.svelte";
@@ -10,7 +10,8 @@
 	import Sidebar from "$lib/Sidebar.svelte";
 	import AgentView from "$lib/AgentView.svelte";
 	import FilePanel from "$lib/FilePanel.svelte";
-	import { linkPaths, md } from "$lib/md";
+	import { linkPaths, md, mdLive } from "$lib/md";
+	import Virtual from "$lib/Virtual.svelte";
 	const plain = (s: string) => linkPaths(s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"));
 
 	type Line = { i: number; kind: string; text: string; date?: number };
@@ -19,10 +20,14 @@
 	type Item = { kind: "user" | "talk"; i: number; text: string } | Tool;
 	type Ask = { token: string; name: string; why: string };
 
-	let items = $state<Item[]>([]), asks = $state<Ask[]>([]), queued = $state<string[]>([]);
+	/** A message shown the moment it's sent, until the server echoes it back queued, steering or in the log (t3code's optimistic send). */
+	type Local = { id: number; text: string; files: string[]; full: string; intent: "steer" | "queued"; sent: boolean };
+
+	let items = $state<Item[]>([]), asks = $state<Ask[]>([]), queued = $state<string[]>([]), steering = $state<string[]>([]), local = $state<Local[]>([]);
+	let stuck = $state(true), seq = 0;
 	let partial = $state(""), busy = $state(false), summarizing = $state(false), note = $state("");
 	let text = $state(""), files = $state<string[]>([]), uploading = $state(0);
-	let main: HTMLElement, box: HTMLTextAreaElement, picker: HTMLInputElement, ws: WebSocket;
+	let main = $state<HTMLElement>(), box: HTMLTextAreaElement, picker: HTMLInputElement, ws: WebSocket;
 	let open: { name: string; at: number }[] = [];
 	let selected = $state(0), menu = $state(false);
 
@@ -58,7 +63,7 @@
 	const loadTraces = () => fetch("/traces.json").then((r) => (r.ok ? r.json() : [])).then((l) => traces.merge(l, "main")).catch(() => {});
 
 	const near = () => !main || main.scrollHeight - main.scrollTop - main.clientHeight < 120;
-	const down = async (force = false) => { if (force || near()) { await tick(); main.scrollTop = main.scrollHeight; } };
+	const down = async (force = false) => { if (force || near()) { await tick(); if (main) main.scrollTop = main.scrollHeight; } };
 
 	function connect() {
 		ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
@@ -67,22 +72,45 @@
 			if (m.trace) traces.apply(m.trace);
 			if (m.asks) asks = m.asks;
 			if (m.queued) queued = m.queued;
-			if (m.history) { for (const x of m.history) add(x); partial = ""; }
-			if (m.partial !== undefined) partial = m.partial;
+			if (m.steering) steering = m.steering;
+			if (m.history) {
+				// A reconnect's snapshot: keep what's drawn and add only newer lines, unless there's a gap.
+				const last = items.at(-1)?.i ?? -1;
+				if (m.history[0]?.i > last + 1) { items = []; open = []; }
+				for (const x of m.history) if (x.i > (items.at(-1)?.i ?? -1)) add(x);
+				live(""); 
+			}
+			if (m.partial !== undefined) live(m.partial);
+			const echoed = [...(m.queued ?? []), ...(m.steering ?? []), ...(m.history ?? []).filter((x: Line) => x.kind === "user").map((x: Line) => x.text)];
+			if (echoed.length) local = local.filter((l) => !l.sent || !echoed.some((t) => t.includes(l.full)));
 			if (m.busy !== undefined) { busy = m.busy; summarizing = !!m.pending; note = ""; }
 			if (m.status) note = m.status;
 			if (m.error) note = m.error;
 			if (stick) down(true);
 		};
-		ws.onopen = loadTraces;
-		ws.onclose = () => setTimeout(() => { items = []; open = []; connect(); }, 1000);
+		ws.onopen = () => { loadTraces(); for (const l of local) if (!l.sent) flush(l); };
+		ws.onclose = () => setTimeout(connect, 1000);
 	}
 	connect();
 
 	const fit = () => { box.style.height = "auto"; box.style.height = `${box.scrollHeight}px`; };
+	// Streamed text lands at most once a frame.
+	let next = "", frame = 0;
+	function live(p: string) {
+		next = p;
+		if (!p) { cancelAnimationFrame(frame); frame = 0; partial = ""; return; }
+		frame ||= requestAnimationFrame(() => { frame = 0; partial = next; if (stuck) down(true); });
+	}
+	function flush(l: Local) {
+		if (ws.readyState !== WebSocket.OPEN) return;
+		ws.send(JSON.stringify({ send: l.text, files: l.files }));
+		l.sent = true;
+	}
 	function send() {
 		if (!canSend) return;
-		ws.send(JSON.stringify({ send: text.trim(), files }));
+		const t = text.trim(), l = { id: ++seq, text: t, files: [...files], full: [t, ...files.map((f) => `[attached: ${f}]`)].filter(Boolean).join("\n"), intent: busy ? "steer" : "queued", sent: false } satisfies Local;
+		local.push(l);
+		flush(local.at(-1)!);
 		text = ""; files = [];
 		tick().then(fit);
 		down(true);
@@ -112,23 +140,31 @@
 		<Button href="/settings" variant="ghost" size="icon-sm" aria-label="settings"><Settings /></Button>
 	</Header>
 
-	<main bind:this={main} class="no-scrollbar flex-1 overflow-y-auto overscroll-contain">
+	<main bind:this={main} class="no-scrollbar flex-1 [overflow-anchor:none] overflow-y-auto overscroll-contain">
 		<div class="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
-			{#each items as x (x.i)}
-				{#if x.kind === "user"}
-					<div class="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap [overflow-wrap:anywhere]" title="#{x.i}">{@html plain(x.text)}</div>
-				{:else if x.kind === "talk"}
-					<div class="md" title="#{x.i}">{@html md(x.text)}</div>
-				{:else}
-					<ToolRow name={x.name} arg={x.arg ?? x.head} code={x.code} body={x.code ? "" : x.body} echo={x.echo} run={x.job !== undefined ? traces.byJob(x.job) : runFor.get(x.i)} />
-				{/if}
+			<Virtual {items} key={(x) => x.i} scroller={main} bind:stuck>
+				{#snippet row(x)}
+					{#if x.kind === "user"}
+						<div class="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap [overflow-wrap:anywhere]" title="#{x.i}">{@html plain(x.text)}</div>
+					{:else if x.kind === "talk"}
+						<div class="md" title="#{x.i}">{@html md(x.text)}</div>
+					{:else if x.kind === "tool"}
+						<ToolRow name={x.name} arg={x.arg ?? x.head} code={x.code} body={x.code ? "" : x.body} echo={x.echo} run={x.job !== undefined ? traces.byJob(x.job) : runFor.get(x.i)} />
+					{/if}
+				{/snippet}
+			</Virtual>
+			{#each [...steering.map((t) => ({ t, intent: "steer" })), ...queued.map((t) => ({ t, intent: "queued" })), ...local.map((l) => ({ t: l.text, intent: l.intent }))] as q, k (k)}
+				<div class="ml-auto flex max-w-[85%] flex-col items-end gap-1">
+					<div class="rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap opacity-70 [overflow-wrap:anywhere]">{strip(q.t)}</div>
+					<span class="text-xs text-muted-foreground">{q.intent === "steer" ? "steer · joins at the next step" : "queued"}</span>
+				</div>
 			{/each}
-			{#each queued as q, k (k)}<div class="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap opacity-60 [overflow-wrap:anywhere]">{strip(q)}</div>{/each}
-			{#if partial}<div class="md text-foreground/80">{@html md(partial)}</div>{/if}
+			{#if partial}<div class="md text-foreground/80">{@html mdLive(partial)}</div>{/if}
 			{#each asks as a (a.token)}<SecretForm {...a} />{/each}
 		</div>
 	</main>
 
+	{#if !stuck}<div class="relative mx-auto w-full max-w-3xl"><Button variant="secondary" size="sm" class="absolute -top-11 left-1/2 -translate-x-1/2 rounded-full shadow" onclick={() => down(true)}><ArrowDown /> latest</Button></div>{/if}
 	<form onsubmit={(e) => { e.preventDefault(); send(); }} class="mx-auto w-full max-w-3xl shrink-0 px-4 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
 		<div class="rounded-2xl border bg-card p-2 shadow-sm transition-shadow focus-within:ring-[3px] focus-within:ring-ring/30">
 			{#if files.length || uploading}
