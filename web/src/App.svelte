@@ -4,6 +4,7 @@
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import ToolRow from "$lib/ToolRow.svelte";
+	import DevinRow from "$lib/DevinRow.svelte";
 	import { parseTool, traces } from "$lib/traces.svelte";
 	import Header from "$lib/Header.svelte";
 	import SecretForm from "$lib/SecretForm.svelte";
@@ -17,7 +18,7 @@
 	type Line = { i: number; kind: string; text: string; date?: number };
 	/** `body` is the call line; `echo` its result; codemode rows carry their `code` and `hash` (matched to a live trace), job rows their `job` id. */
 	type Tool = { kind: "tool"; i: number; name: string; head: string; body: string; arg?: string; code?: string; hash?: string; echo?: string; date?: number; job?: number };
-	type Item = { kind: "user" | "talk"; i: number; text: string } | Tool;
+	type Item = { kind: "user" | "talk" | "devin"; i: number; text: string } | Tool;
 	type Ask = { token: string; name: string; why: string };
 
 	/** A message shown the moment it's sent, until the server echoes it back queued, steering or in the log (t3code's optimistic send). */
@@ -32,12 +33,19 @@
 	let selected = $state(0), menu = $state(false);
 
 	const strip = (s: string) => s.replace(/^\[(via \w+|iMessage)\] /, "");
+	/** Signed Devin callbacks: their own row, whatever kind older logs gave them. */
+	const isDevin = (s: string) => /^\[devin [\w-]+ /.test(strip(s));
+	/** System inputs (jobs, crons, secrets, Devin) waiting in the inbox: not user bubbles. */
+	const isSystem = (s: string) => /^\[(job \d+|secret \w+|cron [\w-]+|devin [\w-]+)[\] ]/.test(strip(s));
 	const canSend = $derived(!uploading && (text.trim().length > 0 || files.length > 0));
 	const status = $derived(note || [busy && "thinking…", summarizing && "summarizing"].filter(Boolean).join(" · "));
 
 	/** Folds a log line in: a tool call and its echo become one collapsible row. */
 	function add(x: Line) {
-		if (x.kind === "job") {
+		if (x.kind === "devin" || ((x.kind === "job" || x.kind === "user") && isDevin(x.text))) {
+			open = [];
+			items.push({ kind: "devin", i: x.i, text: strip(x.text) });
+		} else if (x.kind === "job") {
 			const t = strip(x.text);
 			const head = t.split("\n")[0], job = Number(/\[job (\d+)/.exec(head)?.[1]);
 			items.push({ kind: "tool", i: x.i, name: "job", head, body: "", arg: head, echo: t, job: Number.isFinite(job) ? job : undefined });
@@ -191,6 +199,8 @@
 				{#snippet row(x)}
 					{#if x.kind === "user"}
 						<div class="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap [overflow-wrap:anywhere]" title="#{x.i}">{@html plain(x.text)}</div>
+					{:else if x.kind === "devin"}
+						<div title="#{x.i}"><DevinRow text={x.text} /></div>
 					{:else if x.kind === "talk"}
 						<div class="md" title="#{x.i}">{@html md(x.text)}</div>
 					{:else if x.kind === "tool"}
@@ -199,10 +209,16 @@
 				{/snippet}
 			</Virtual>
 			{#each [...steering.map((t) => ({ t, intent: "steer" })), ...queued.map((t) => ({ t, intent: "queued" })), ...local.map((l) => ({ t: l.text, intent: l.intent }))] as q, k (k)}
+				{#if isDevin(q.t)}
+					{#each strip(q.t).split(/\n\n(?=\[devin )/) as d}<DevinRow text={d} pending />{/each}
+				{:else if isSystem(q.t)}
+					<div class="truncate font-mono text-xs text-muted-foreground opacity-70">{strip(q.t).split("\n")[0]} · {q.intent === "steer" ? "joins at the next step" : "queued"}</div>
+				{:else}
 				<div class="ml-auto flex max-w-[85%] flex-col items-end gap-1">
 					<div class="rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap opacity-70 [overflow-wrap:anywhere]">{strip(q.t)}</div>
 					<span class="text-xs text-muted-foreground">{q.intent === "steer" ? "steer · joins at the next step" : "queued"}</span>
 				</div>
+				{/if}
 			{/each}
 			{#if partial}<div class="md text-foreground/80">{@html mdLive(partial)}</div>{/if}
 			{#each asks as a (a.token)}<SecretForm {...a} />{/each}
