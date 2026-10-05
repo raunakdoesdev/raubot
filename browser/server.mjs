@@ -42,6 +42,8 @@ async function loadKeys(fresh = false) {
 async function browser() {
 	if (ctx) return ctx;
 	fs.mkdirSync(`${DIR}/browser`, { recursive: true });
+	// A box copied from a snapshot keeps the original box's Chromium locks; this server is the profile's only user.
+	for (const f of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) fs.rmSync(`${DIR}/browser/${f}`, { force: true });
 	ctx = await chromium.launchPersistentContext(`${DIR}/browser`, {
 		channel: "chromium", headless: true, viewport: VIEWPORT, deviceScaleFactor: 1, acceptDownloads: true, ...(fs.existsSync("/workspace") ? { downloadsPath: "/workspace/uploads/downloads" } : {}),
 		args: ["--no-sandbox", "--disable-blink-features=AutomationControlled"],

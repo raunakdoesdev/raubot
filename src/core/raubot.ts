@@ -350,8 +350,10 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				execute: async ({ code, timeout }, api) => {
 					const env = await fx(Effect.flatMap(Secrets, (s) => s.env()));
 					const main = ns.getByName("main");
-					const r = await fx(browse(code, Math.min(timeout ?? 60, 600), env, (await main.jar()) as Jar).pipe(Effect.provide(BoxLive(ns, this.#boxOf(api.conversationId)))));
+					const jar = (await main.jar()) as Jar;
+					const r = await fx(browse(code, Math.min(timeout ?? 60, 600), env, jar).pipe(Effect.provide(BoxLive(ns, this.#boxOf(api.conversationId)))));
 					if (r.changed && Object.keys(r.changed).length) await main.jarPut(r.changed);
+					console.log("browser jar", JSON.stringify({ box: this.#boxOf(api.conversationId), jar: Object.keys(jar).length, changed: Object.keys(r.changed ?? {}) }));
 					return {
 						content: [{ type: "text", text: redact(env, `${r.out || "(no output)"}\n\ntabs (* is page):\n${r.tabs}`) }, ...r.images.map((data) => ({ type: "image" as const, mimeType: "image/jpeg", data }))],
 						isError: r.error,
