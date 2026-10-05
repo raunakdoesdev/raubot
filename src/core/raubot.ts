@@ -449,7 +449,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				for (const m of e.model ?? []) {
 					const date = m.timestamp ?? Date.now();
 					if (m.role === "assistant" && m.usage) this.#usage({ date, ...m.usage });
-					if (m.role === "user") { const t = text(m.content); this.#log(/^(\[via \w+\] )?\[(job \d+|secret \w+|cron [\w-]+|devin [\w-]+)[\] ]/.test(t) ? "job" : "user", t, date); }
+					if (m.role === "user") { const t = text(m.content); this.#log(/^(\[via \w+\] )?\[devin [\w-]+ /.test(t) ? "devin" : /^(\[via \w+\] )?\[(job \d+|secret \w+|cron [\w-]+)[\] ]/.test(t) ? "job" : "user", t, date); }
 					else if (m.role === "toolResult") this.#log("echo", `${m.toolName}: ${text(m.content)}`, date);
 					else for (const b of m.content) {
 						if (typeof b === "string") continue;

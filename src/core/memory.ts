@@ -1,6 +1,6 @@
 import { CAP, COMPACT_PROMPT, JOBS, NODE, RETRY, TRIES, VIEW } from "./prompts.ts";
 
-export type Msg = { i: number; kind: "user" | "talk" | "tool" | "echo" | "job"; text: string; date: number };
+export type Msg = { i: number; kind: "user" | "talk" | "tool" | "echo" | "job" | "devin"; text: string; date: number };
 type Part = [l: number, i: number];
 type Llm = (system: string, prompt: string) => Promise<string>;
 
@@ -46,7 +46,7 @@ export class Memory {
 	set(k: string, v: string) { this.sql.exec("INSERT OR REPLACE INTO rb_meta (k, v) VALUES (?, ?)", k, v); }
 
 	append(kind: Msg["kind"], text: string, date: number) {
-		const m: Msg = { i: this.log.length, kind, text: kind === "echo" || kind === "job" ? cap(text) : text, date };
+		const m: Msg = { i: this.log.length, kind, text: kind === "echo" || kind === "job" || kind === "devin" ? cap(text) : text, date };
 		this.sql.exec("INSERT INTO rb_msg (i, kind, text, date) VALUES (?, ?, ?, ?)", m.i, m.kind, m.text, m.date);
 		this.log.push(m);
 		this.#push(m.i);

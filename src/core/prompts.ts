@@ -19,7 +19,7 @@ When a site emails a confirmation code or link, fetch it yourself from the user'
 
 export const VIEW_DOC = `The VIEW is a list of lines, oldest first, covering every message of the conversation exactly once.
 Each line looks like \`id+n|text\`: it summarizes the n messages starting at message id (n is a power of two; n=1 lines of short messages are verbatim).
-Messages are tagged by kind: "user" (the user), "talk" (your replies), "tool" (your tool calls), "echo" (tool results), "job" (results of your background jobs).
+Messages are tagged by kind: "user" (the user), "talk" (your replies), "tool" (your tool calls), "echo" (tool results), "job" (results of your background jobs), "devin" (signed Devin session callbacks).
 Older parts are summarized more coarsely; recent parts are finer.
 To look closer, use \`tools.zoom({ id, n })\`: for n>1 it returns the two lines for the halves of the range id+n; for n=1, the complete original message id. \`tools.date({ id })\` returns when message id was logged.`;
 

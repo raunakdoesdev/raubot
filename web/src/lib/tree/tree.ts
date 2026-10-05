@@ -6,7 +6,7 @@ export type Top = { log: number; bytes: number; budget: number; pending: boolean
 
 export const get = <T = any>(q = ""): Promise<T> => fetch(`/tree.json${q}`).then((r) => r.json());
 
-const KIND: Record<string, string> = { user: "#e0af68", talk: "#9ece6a", tool: "#bb9af7", echo: "#7dcfff", job: "#ff9e64" };
+const KIND: Record<string, string> = { user: "#e0af68", talk: "#9ece6a", tool: "#bb9af7", echo: "#7dcfff", job: "#ff9e64", devin: "#73daca" };
 export const kindColor = (k = "") => KIND[k] ?? "#888";
 export const color = (p: P) => (p.l ? `hsl(${(210 + p.l * 32) % 360} 55% 62%)` : kindColor(p.kind));
 export const label = (p: P) => (p.l ? `L${p.l}` : (p.kind ?? "msg"));
