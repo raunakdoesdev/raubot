@@ -21,8 +21,8 @@ export interface Channel {
 	readonly style: string;
 	/** A webhook request (POST /<name>) as verified, deduped messages. */
 	receive(req: Request): Effect.Effect<Inbound[], ChannelError, Storage>;
-	/** Sending a message also ends a typing indicator. Markdown images of box files (see `images`) go as attachments. */
-	send(to: string, text: string): Effect.Effect<void, ChannelError, Box>;
+	/** Sending a message also ends a typing indicator. Markdown images of box files (see `images`) and `files` (absolute box paths) go as attachments. */
+	send(to: string, text: string, files?: string[]): Effect.Effect<void, ChannelError, Box>;
 	/** Optional presence, where the channel has it: read receipts, typing indicator, emoji reactions. */
 	read?(m: Inbound): Effect.Effect<void, ChannelError, Box>;
 	typing?(to: string, on: boolean): Effect.Effect<void, ChannelError, Box>;
@@ -45,8 +45,8 @@ export const images = (text: string) => {
 	return { text: text.replace(IMAGE, "").replace(/\n{3,}/g, "\n\n").trim(), files };
 };
 
-export const send = (cs: Channels, to: Origin, text: string) =>
-	cs[to.channel]?.send(to.to, text) ?? Effect.fail(new ChannelError({ message: `No channel "${to.channel}".`, status: 404 }));
+export const send = (cs: Channels, to: Origin, text: string, files?: string[]) =>
+	cs[to.channel]?.send(to.to, text, files) ?? Effect.fail(new ChannelError({ message: `No channel "${to.channel}".`, status: 404 }));
 
 export const channelDoc = (cs: Channels) =>
 	[`Messages starting with "[via <channel>]" came from that channel instead of this app, and your final reply is sent back there.`,

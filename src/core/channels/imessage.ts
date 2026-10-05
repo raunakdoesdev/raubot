@@ -32,7 +32,7 @@ flock /tmp/imessage.lock sh -c 'git -C raubot fetch -q && git -C raubot checkout
 /** iMessage through Photon's Spectrum. Its SDK is gRPC, which Workers can't speak, so the box runs its actions. */
 export const imessage = (secret: string): Channel => ({
 	name: "imessage",
-	style: "a text message: keep the reply short. Markdown is converted to iMessage styling (markdown images of box files go as real attachments), so use only **bold**, _italic_, ~~strikethrough~~, `code` (shown in a monospace font), - bullets, 1. numbered lists and > quotes. Headings come out as bold lines, links as text (url) and tables as rows split by |. Never send long code blocks.",
+	style: "a text message: keep the reply short and in plain text, with no markdown (no **, _, #, tables or code blocks); write links as bare URLs. The one exception: a markdown image of a box file goes as a real attachment.",
 	receive: (req) => Effect.gen(function* () {
 		const body = yield* Effect.promise(() => req.text());
 		if (!(yield* signed(secret, req.headers, body))) return yield* new ChannelError({ message: "bad signature", status: 401 });
@@ -45,9 +45,9 @@ export const imessage = (secret: string): Channel => ({
 			files: files ? (dir: string) => spectrum(m.space.id, { OP: "download", MSG: m.id, DIR: dir }).pipe(Effect.map((out) => JSON.parse(/^FILES (.*)$/m.exec(out)?.[1] ?? "[]") as string[])) : undefined,
 		}];
 	}),
-	send: (to, text) => {
-		const m = images(text);
-		return Effect.asVoid(spectrum(to, { OP: "send", TEXT_B64: b64(m.text), ...(m.files.length ? { FILES: JSON.stringify(m.files) } : {}) }));
+	send: (to, text, extra = []) => {
+		const m = images(text), files = [...new Set([...m.files, ...extra])];
+		return Effect.asVoid(spectrum(to, { OP: "send", TEXT_B64: b64(m.text), ...(files.length ? { FILES: JSON.stringify(files) } : {}) }));
 	},
 	read: (m) => Effect.asVoid(spectrum(m.from.to, { OP: "read", MSG: m.id })),
 	typing: (to, on) => Effect.asVoid(spectrum(to, { OP: "typing", ON: on ? "1" : "0" })),

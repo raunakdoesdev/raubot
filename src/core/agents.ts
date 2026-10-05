@@ -1,6 +1,7 @@
 import { Data, Effect } from "effect";
 import Value from "typebox/value";
 import { kv } from "./fx.ts";
+import { SUBAGENT } from "./prompts.ts";
 
 export class AgentError extends Data.TaggedError("AgentError")<{ message: string }> {}
 
@@ -40,7 +41,8 @@ export const agent = (host: AgentHost, key: string, { task, schema, computer = f
 	}
 	const ask = (content: string, n: string) => attempt(() => host.ask(id, content, `${key}:${n}`));
 	const shape = schema ? `\n\nReply with only JSON (no prose, no code fence) matching this JSON Schema:\n${JSON.stringify(schema)}` : "";
-	let reply = yield* ask(`Task: ${task}${shape}`, "0");
+	// The subagent's rules ride in its first message, after the view: its system prompt and tools stay byte-identical to raubot's, so the prefix is a cache hit.
+	let reply = yield* ask(`<instructions>\n${SUBAGENT}\n</instructions>\n\nTask: ${task}${shape}`, "0");
 	for (let k = 0; k < 5 && (yield* attempt(() => host.needless(reply))); k++) reply = yield* ask(APPROVED, `ok${k}`);
 	if (!schema) return reply as unknown;
 	for (let n = 1; ; n++) {

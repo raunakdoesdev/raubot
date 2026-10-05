@@ -16,7 +16,7 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
-import { BROWSER, COMPUTER, EXECUTOR, MARKS, MASTER, SELF, SETTLE, SUBAGENT, VIEW, VIEW_DOC } from "./prompts.ts";
+import { BROWSER, COMPUTER, CRONS, EXECUTOR, HEARTBEAT, MARKS, MASTER, SELF, SETTLE, VIEW, VIEW_DOC } from "./prompts.ts";
 import { browse, responses } from "./computer.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Computer } from "./box.ts";
@@ -34,10 +34,12 @@ import { JobHost, Jobs, JobsLive } from "./jobs.ts";
 import { OAuth } from "./oauth.ts";
 import { redact, Secrets, SecretsLive } from "./secrets.ts";
 import { type TraceEvent, Tracer } from "./trace.ts";
+import * as cron from "./cron.ts";
 
 type Env = { SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
 
 type Services = Storage | Box | Jobs | JobHost | Secrets;
+type CronArgs = { add?: Partial<cron.Cron> & Pick<cron.Cron, "id" | "schedule" | "prompt">; remove?: string[]; run?: string };
 
 const SOL = { provider: "openai", modelId: "gpt-6.1-sol" };
 
@@ -149,6 +151,7 @@ export class Raubot extends DurableObject<Env> implements Core {
 				return r;
 			},
 			bump: (from, text) => this.send(text, from),
+			note: (job, text) => this.#fx(cron.record(job.label.replace(/^cron /, ""), /^"?(SENT|SKIPPED|SILENT)/.exec(text)?.[1]?.toLowerCase() ?? "done")),
 			stopChildren: async (id) => {
 				for (const c of (await this.ctx.storage.list<number>({ prefix: `agent:job:${id}:` })).values()) await (await this.harness.conversation(c as never, C))?.abort(C);
 			},
@@ -256,6 +259,25 @@ Example: find the Slack messages that need the user's attention.
 			},
 			...executor.nested,
 		];
+		const messageDoc: Nested = {
+			name: "message",
+			description: "Send the user a message yourself, without waiting to be asked (to answer the current message, just reply). channel: \"imessage\" (default) or \"app\". files: box paths sent as attachments (any type). Put links in text as bare URLs. Over iMessage write plain text, no markdown. For crons, alerts and results the user needs now; don't text for things that can wait.",
+			inputSchema: Type.Object({ text: Type.String(), channel: Type.Optional(Type.String()), files: Type.Optional(Type.Array(Type.String())) }),
+			execute: () => Promise.reject(new Error("unbound")),
+		};
+		const cronsDoc: Nested = {
+			name: "crons",
+			description: `Your scheduled prompts, kept across restarts: [{ id, schedule, tz, prompt, mode, channel, unless, timeout, enabled, next, last }]. No args lists them.
+		\`add: { id, schedule, prompt, tz?, mode?, channel?, unless?, timeout?, enabled? }\` creates or replaces one. schedule: 5-field cron "min hour dom mon dow" (e.g. "0 8 * * 1-5" = 8:00 on weekdays) in tz (default ${cron.TZ}), or an ISO time for a one-shot. mode "agent" (default): a fresh subagent runs the prompt (it sees your VIEW and has your tools) and its final reply goes to channel ("imessage" default, or "app"); a reply of NO_REPLY or HEARTBEAT_OK sends nothing. mode "turn": the prompt comes to you as a "[cron <id>]" message and your reply goes to channel. unless: a bash test run first; exit 0 skips the run ({date} is today in tz, e.g. "test -f /workspace/briefings/{date}.sent"). timeout: seconds (default 3600).
+		\`remove: [ids]\` deletes some; \`run: id\` runs one now.`,
+			inputSchema: Type.Object({
+				add: Type.Optional(Type.Object({ id: Type.String(), schedule: Type.String(), prompt: Type.String(), tz: Type.Optional(Type.String()), mode: Type.Optional(Type.Union([Type.Literal("agent"), Type.Literal("turn")])), channel: Type.Optional(Type.String()), unless: Type.Optional(Type.String()), timeout: Type.Optional(Type.Integer()), enabled: Type.Optional(Type.Boolean()) })),
+				remove: Type.Optional(Type.Array(Type.String())),
+				run: Type.Optional(Type.String()),
+			}),
+			execute: (args: CronArgs) => this.#crons(args),
+		};
+		nested.push(messageDoc, cronsDoc);
 		const agentDoc: Nested = {
 			name: "agent",
 			description: `Start a subagent on a task and get its result. It runs on your model with all your tools (except agent and agents), sees your current VIEW as context, and does only the task. Its work stays out of your memory. Run several with Promise.all.
@@ -272,7 +294,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			inputSchema: Type.Object({ send: Type.Optional(Type.Object({ id: Type.Integer(), message: Type.String() })), stop: Type.Optional(Type.Array(Type.Integer())) }),
 			execute: () => Promise.reject(new Error("unbound")),
 		};
-		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
+		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF}\n\n${CRONS}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
 		nested.push(agentDoc, agentsDoc, {
 			name: "jobs",
 			description: "Your background jobs, newest first: { id, label, status, started, ended, deadline }. `cancel: [ids]` stops running ones (no result comes back); `prune: true` forgets finished ones.",
@@ -284,7 +306,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				return (yield* jobs.list()).reverse().map(({ code: _, from: __, ...j }) => j);
 			})),
 		});
-		this.#tools = (scope, owner) => nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(scope, owner) } : t === agentsDoc ? { ...t, execute: this.#agents(owner) } : t));
+		this.#tools = (scope, owner) => nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(scope, owner) } : t === agentsDoc ? { ...t, execute: this.#agents(owner) }
+			: t === messageDoc ? { ...t, execute: this.#message(owner?.api.conversationId === this.root.id) } : t));
 		this.#app = executor.app;
 		this.#prompt = `# System prompt\n\n${system}\n\n# codemode tool description\n\n${describe(nested)}\n`;
 		const registry = createRegistry();
@@ -367,9 +390,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		});
 		this.harness.resume();
 		await this.#fx(Effect.flatMap(Jobs, (j) => j.resume()));
+		await this.#seed();
 		await this.#sync();
 		this.memory.pump();
 		this.#changed();
+		await this.#arm();
 		void this.#drain().catch((e) => console.error("drain", e));
 	}
 
@@ -395,7 +420,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				for (const m of e.model ?? []) {
 					const date = m.timestamp ?? Date.now();
 					if (m.role === "assistant" && m.usage) this.#usage({ date, ...m.usage });
-					if (m.role === "user") { const t = text(m.content); this.#log(/^(\[via \w+\] )?\[(job \d+|secret \w+) /.test(t) ? "job" : "user", t, date); }
+					if (m.role === "user") { const t = text(m.content); this.#log(/^(\[via \w+\] )?\[(job \d+|secret \w+|cron [\w-]+)[\] ]/.test(t) ? "job" : "user", t, date); }
 					else if (m.role === "toolResult") this.#log("echo", `${m.toolName}: ${text(m.content)}`, date);
 					else for (const b of m.content) {
 						if (typeof b === "string") continue;
@@ -458,12 +483,13 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	/** Once the turn ends, its final reply goes back to the channel that started it. Stored, so a restart mid-turn still delivers. */
 	async #deliver() {
 		const r = await this.ctx.storage.get<Origin & { start: number }>("reply");
-		const reply = r && !this.busy() && this.memory.log.slice(r.start).filter((m) => m.kind === "talk").at(-1)?.text;
+		const said = r && !this.busy() && this.memory.log.slice(r.start).filter((m) => m.kind === "talk").at(-1)?.text;
+		const reply = said && !cron.SILENT.test(said) ? said : undefined;
 		if (r && !reply && !this.busy() && this.memory.log.length > r.start + 1) { // ended silent
 			await this.ctx.storage.delete("reply");
 			await this.#fx(idle(this.#channels, r));
 		}
-		if (!reply || this.#delivering) return;
+		if (!r || !reply || this.#delivering) return;
 		this.#delivering = true;
 		try {
 			await this.ctx.storage.delete("reply");
@@ -487,7 +513,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		const ctx = owner?.ctx ?? C;
 		const conv = async (id: number) => (await this.harness.conversation(id as never, C)) ?? Promise.reject(new Error(`No subagent ${id}.`));
 		const kind = (computer: boolean) => ({
-			model: computer ? SOL : { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium" as const, instructions: SUBAGENT,
+			// No instructions here: they'd join the system prompt and break the prefix cached with raubot's own turns. agents.ts puts them in the task.
+			model: computer ? SOL : { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium" as const,
 			...(computer ? { extensions: { add: [this.#computer] } } : {}),
 		});
 		const host: AgentHost = {
@@ -501,6 +528,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			ask: async (id, content, requestId) => {
 				const child = (owner ? await owner.api.conversation(id as never, ctx) : await this.harness.conversation(id as never, C))!;
 				await (await child.submit({ type: "input", content, requestId }, ctx)).wait(ctx);
+				const page = await (await conv(id)).entries({}, 3, undefined, C);
+				for (const e of page.items) for (const m of e.model ?? []) if (m.role === "assistant" && m.usage) console.log("agent usage", JSON.stringify({ agent: id, input: m.usage.input, cacheRead: m.usage.cacheRead, cacheWrite: m.usage.cacheWrite, output: m.usage.output }));
 				return host.last(id);
 			},
 			last: async (id) => {
@@ -599,7 +628,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	async send(input: string, from: Origin = APP, files: string[] = []) {
 		input = tag(from, [input, ...files.map((f) => `[attached: ${f}]`)].filter(Boolean).join("\n"));
 		if (from.channel !== APP.channel) {
-			await this.ctx.storage.put("reply", { ...from, start: this.memory.log.length });
+			await this.ctx.storage.put({ reply: { ...from, start: this.memory.log.length }, [`origin:${from.channel}`]: from });
 		}
 		if (this.busy()) return void (await this.root.submit({ type: "input", content: input, whenBusy: "steer" }, C));
 		const queued = [...await this.#queued(), input];
@@ -691,7 +720,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	#changed() {
 		this.#broadcast({ log: this.memory.log.length, pending: this.memory.pending(), busy: this.state ? this.busy() : false });
-		if (this.memory.pending()) void this.ctx.storage.setAlarm(Date.now() + 30_000);
+		if (this.memory.pending()) void this.#arm(Date.now() + 30_000);
 	}
 
 	#broadcast(e: CoreEvent) {
@@ -743,9 +772,84 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		setTimeout(() => this.ctx.abort("executor connected"), 100);
 	}
 
+	/** One alarm serves memory, jobs and crons: set it to the earliest of `at` and the next cron, never later than one already set. */
+	async #arm(at = Infinity) {
+		const when = Math.min(at, await this.#fx(cron.wake));
+		const set = await this.ctx.storage.getAlarm();
+		if (when < Infinity && (set === null || when < set)) await this.ctx.storage.setAlarm(Math.max(when, Date.now()));
+	}
+
 	async alarm() {
 		this.memory.pump();
-		if ((await this.#fx(Effect.flatMap(Jobs, (j) => j.resume()))) || this.memory.pending()) await this.ctx.storage.setAlarm(Date.now() + 30_000);
+		for (const c of await this.#fx(cron.due(Date.now()))) await this.#fire(c).catch((e) => console.error("cron", c.id, e));
+		const busy = (await this.#fx(Effect.flatMap(Jobs, (j) => j.resume()))) || this.memory.pending();
+		await this.#arm(busy ? Date.now() + 30_000 : Infinity);
+	}
+
+	/** The heartbeat cron, created once (removing it sticks). It reads HEARTBEAT.md and stays silent unless something needs the user. */
+	async #seed() {
+		if (await this.ctx.storage.get("cron-seeded")) return;
+		await this.#fx(cron.put({ id: "heartbeat", schedule: "30 7-22 * * *", tz: cron.TZ, prompt: HEARTBEAT, mode: "agent", channel: "imessage", unless: "! grep -q '^[[:space:]]*- ' /workspace/HEARTBEAT.md", timeout: 900, enabled: true }));
+		await this.ctx.storage.put("cron-seeded", true);
+	}
+
+	/** Where a channel reaches the user: the last place they wrote from on it. */
+	async #origin(channel: string): Promise<Origin> {
+		if (channel === APP.channel) return APP;
+		const saved = await this.ctx.storage.get<Origin>(`origin:${channel}`);
+		if (saved) return saved;
+		const jobs = await this.#fx(Effect.flatMap(Jobs, (j) => j.list()));
+		const seen = jobs.reverse().find((j) => j.from.channel === channel && j.from.to)?.from;
+		if (!seen) throw new Error(`No ${channel} address yet: the user has to message raubot there once.`);
+		return seen;
+	}
+
+	/** `tools.message`: a proactive send. Outside raubot's own turn (jobs, subagents) it's noted in the log, so raubot knows what the user got. */
+	#message(own: boolean) {
+		return async ({ text, channel = "imessage", files = [] }: { text: string; channel?: string; files?: string[] }) => {
+			const paths = files.map((f) => (f.startsWith("/") ? f : `/workspace/${f}`));
+			if (channel === APP.channel) this.#log("talk", text, Date.now());
+			else {
+				await this.#fx(deliver(this.#channels, await this.#origin(channel), text, paths));
+				if (!own) this.#log("job", `[sent via ${channel}] ${text}${paths.length ? `\n[files: ${paths.join(", ")}]` : ""}`, Date.now());
+			}
+			return `Sent via ${channel}.`;
+		};
+	}
+
+	/** Starts one cron run. "agent": a quiet job runs the prompt on a fresh subagent and sends its reply unless silent. "turn": the prompt comes to raubot. */
+	async #fire(c: cron.Cron, manual = false) {
+		const unless = c.unless?.replaceAll("{date}", cron.today(c.tz));
+		if (c.mode === "turn") {
+			if (unless && /\[exit 0\]\s*$/.test(await this.#fx(bash(unless, 60)))) return void (await this.#fx(cron.record(c.id, "skipped")));
+			return this.send(`[cron ${c.id}] ${c.prompt}`, await this.#origin(c.channel));
+		}
+		const when = manual ? "started by hand" : `schedule "${c.schedule}" ${c.tz}`;
+		const task = `This is a run of your "${c.id}" cron (${when}), at ${new Date().toISOString()}. Its prompt:\n\n${c.prompt}\n\nYour final reply goes to the user on ${c.channel} as is. If nothing needs them, reply exactly NO_REPLY.`;
+		const code = `const c = ${JSON.stringify({ id: c.id, unless, task, channel: c.channel })};
+	if (c.unless && /\\[exit 0\\]\\s*$/.test(await tools.bash({ cmd: c.unless, timeout: 60 }))) return "SKIPPED " + c.id;
+	const reply = String(await tools.agent({ task: c.task }));
+	if (new RegExp(${JSON.stringify(cron.SILENT.source)}).test(reply)) return "SILENT " + c.id;
+	await tools.message({ text: reply, channel: c.channel });
+	return "SENT " + c.id + ": " + reply.slice(0, 300);`;
+		await this.#fx(Effect.flatMap(Jobs, (j) => j.start(code, `cron ${c.id}`, c.timeout, APP, true)));
+	}
+
+	/** `tools.crons`. */
+	async #crons({ add, remove = [], run }: CronArgs) {
+		if (remove.length) await this.#fx(cron.remove(remove));
+		if (add) {
+			const old = await this.#fx(cron.get(add.id));
+			await this.#fx(cron.put({ tz: cron.TZ, mode: "agent", channel: "imessage", timeout: 3600, enabled: true, ...add, ...(old?.last && { last: old.last }) }));
+		}
+		if (run) {
+			const c = await this.#fx(cron.get(run));
+			if (!c) throw new Error(`No cron "${run}".`);
+			await this.#fire(c, true);
+		}
+		await this.#arm();
+		const pt = (t?: number) => (t ? `${new Date(t).toLocaleString("en-US", { timeZone: cron.TZ, dateStyle: "medium", timeStyle: "short" })} PT` : undefined);
+		return JSON.stringify((await this.#fx(cron.list)).map((c) => ({ ...c, prompt: c.prompt.length > 300 ? `${c.prompt.slice(0, 300)}…` : c.prompt, next: pt(c.next), last: c.last && { ...c.last, at: pt(c.last.at) } })));
 	}
 
 	/** Channel webhooks (POST /<channel>); everything else is the web app. */

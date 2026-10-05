@@ -3,7 +3,8 @@ import type { Origin } from "./channels/index.ts";
 import { kv, Storage } from "./fx.ts";
 
 export type Status = "running" | "done" | "failed" | "timed out" | "cancelled";
-export type Job = { id: number; label: string; code: string; from: Origin; status: Status; started: number; deadline: number; ended?: number };
+/** quiet: a successful run reports to host.note instead of bumping raubot (crons). */
+export type Job = { id: number; label: string; code: string; from: Origin; status: Status; started: number; deadline: number; ended?: number; quiet?: boolean };
 
 export const MAX_RUNNING = 100;
 export const MAX_TIMEOUT = 86_400;
@@ -14,12 +15,13 @@ export class JobError extends Data.TaggedError("JobError")<{ message: string }> 
 export class JobHost extends Context.Tag("JobHost")<JobHost, {
 	run(job: Job, signal: AbortSignal): Promise<{ text: string; error?: boolean }>;
 	bump(from: Origin, text: string): Promise<void>;
+	note(job: Job, text: string): Promise<void>;
 	stopChildren(id: number): Promise<void>;
 }>() {}
 
 /** Background jobs: codemode scripts run outside any turn. Each reports back once, as a `[job <id> <status>]` message on the channel it started from. */
 export class Jobs extends Context.Tag("Jobs")<Jobs, {
-	start(code: string, label: string, timeout: number, from: Origin): Effect.Effect<Job, JobError>;
+	start(code: string, label: string, timeout: number, from: Origin, quiet?: boolean): Effect.Effect<Job, JobError>;
 	list(): Effect.Effect<Job[]>;
 	cancel(id: number): Effect.Effect<void>;
 	/** Forget finished jobs. */
@@ -49,16 +51,16 @@ export const JobsLive = Layer.effect(Jobs, Effect.gen(function* () {
 		if (now?.status !== "running") return; // cancelled or reset
 		const status: Status = !r.error ? "done" : Date.now() > job.deadline ? "timed out" : "failed";
 		yield* put({ ...now, status, ended: Date.now() });
-		yield* Effect.promise(() => host.bump(job.from, `[job ${job.id} ${status}] ${job.label}\n${r.text}`));
+		yield* Effect.promise(() => (job.quiet && status === "done" ? host.note(job, r.text) : host.bump(job.from, `[job ${job.id} ${status}] ${job.label}\n${r.text}`)));
 	}).pipe(Effect.catchAllCause(Effect.logError), Effect.forkDaemon, Effect.asVoid);
 
 	return {
-		start: (code, label, timeout, from) => Effect.gen(function* () {
+		start: (code, label, timeout, from, quiet) => Effect.gen(function* () {
 			if (!(timeout > 0 && timeout <= MAX_TIMEOUT)) return yield* new JobError({ message: `timeout must be 1..${MAX_TIMEOUT} seconds.` });
 			if ((yield* all).filter((j) => j.status === "running").length >= MAX_RUNNING) return yield* new JobError({ message: `${MAX_RUNNING} jobs are already running: cancel some first.` });
 			const id = ((yield* kv.get<number>("job-next").pipe(Effect.provideService(Storage, storage))) ?? 1);
 			const now = Date.now();
-			const job: Job = { id, label, code, from, status: "running", started: now, deadline: now + timeout * 1000 };
+			const job: Job = { id, label, code, from, status: "running", started: now, deadline: now + timeout * 1000, ...(quiet && { quiet }) };
 			yield* kv.put({ "job-next": id + 1, [at(id)]: job }).pipe(Effect.provideService(Storage, storage));
 			yield* run(job);
 			return job;
