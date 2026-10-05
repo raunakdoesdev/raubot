@@ -3,6 +3,7 @@ import type { Core } from "../core/api.ts";
 import type { Computer } from "../core/box.ts";
 import og from "./og.png";
 import { TTLS } from "./ttl.ts";
+import { files } from "./files.ts";
 
 const TOKEN = /^\/s\/([\w-]{32})(\.json)?$/;
 
@@ -29,6 +30,7 @@ export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Pro
 			.on('meta[property="og:image"]', set(`${url.origin}/s/og.png`))
 			.transform(await asset("/secret"));
 	}
+	if (pathname === "/files.json" || pathname === "/file") return files(req, env, url);
 	if (pathname === "/box") {
 		const box = env.BOX;
 		const b = box.getByName("main");
