@@ -614,11 +614,21 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	/** App: subagents and jobs for the sidebar. */
 	async agentList() {
-		const list = (await this.#fx(agents(this.#host(), {}))) as AgentRow[];
 		const iso = (t?: number) => (t ? new Date(t).toISOString() : undefined);
-		const jobs = (await this.#fx(Effect.flatMap(Jobs, (j) => j.list()))).reverse().slice(0, 30)
-			.map((j) => ({ id: j.id, label: j.label, status: j.status, started: iso(j.started)!, ended: iso(j.ended), deadline: iso(j.deadline)! }));
-		return { agents: list, jobs };
+		// Jobs come from DO state: cheap, and they still show if a subagent check fails.
+		const jobs = await this.#fx(Effect.flatMap(Jobs, (j) => j.list())).then((all) => all.reverse().slice(0, 30)
+			.map((j) => ({ id: j.id, label: j.label, status: j.status, started: iso(j.started)!, ended: iso(j.ended), deadline: iso(j.deadline)! })))
+			.catch((e) => { console.error("agentList jobs", e); return []; });
+		// Only recent subagents can be running; each check is bounded so one slow or dead conversation can't sink the list.
+		const infos = [...(await this.ctx.storage.list<AgentInfo>({ prefix: "agentinfo:" })).values()]
+			.sort((a, b) => b.started - a.started).filter((a, i) => i < 15 || Date.now() - a.started < 2 * 86400_000).slice(0, 40);
+		const host = this.#host();
+		const within = <A>(p: Promise<A>, ms: number, fallback: A) => Promise.race([p, new Promise<A>((r) => setTimeout(() => r(fallback), ms))]).catch(() => fallback);
+		const agents = await Promise.all(infos.map(async (a): Promise<AgentRow> => {
+			const running = await within(host.running(a.id), 3000, false);
+			return { id: a.id, task: a.task.slice(0, 200), computer: a.computer ?? false, status: running ? "running" : "idle", started: new Date(a.started).toISOString(), last: "" };
+		}));
+		return { agents, jobs };
 	}
 
 	async #agentRow(info: AgentInfo): Promise<AgentRow> {

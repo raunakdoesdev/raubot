@@ -85,7 +85,9 @@ export const serve = async (core: Core, req: Request): Promise<Response> => {
 		case "/secrets.json":
 			if (req.method === "DELETE") await core.removeSecret(url.searchParams.get("name") ?? "");
 			return Response.json(await core.secrets());
-		case "/agents.json": return Response.json(await core.agentList());
+		case "/agents.json":
+			try { return Response.json(await core.agentList()); }
+			catch (e) { console.error("agents.json", e); return Response.json({ error: String(e).slice(0, 200) }, { status: 500 }); }
 		case "/agent.json": {
 			const id = Number(url.searchParams.get("id"));
 			if (req.method === "POST") {
