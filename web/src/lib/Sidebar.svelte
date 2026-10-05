@@ -16,13 +16,15 @@
 		return s < 60 ? "now" : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86400)}d`;
 	};
 
+	/** Keeps the last good list on failure; the error is a short line, never a server's HTML page. */
 	async function poll() {
 		try {
 			const r = await fetch("/agents.json");
-			if (!r.ok) throw new Error(await r.text());
-			const d = await r.json();
-			agents = d.agents; jobs = d.jobs; err = "";
-		} catch (e) { err = String(e).slice(0, 120); }
+			if (!r.ok) { err = `couldn't load subagents (HTTP ${r.status}), retrying`; return; }
+			const d = await r.json().catch(() => undefined);
+			if (!d || !Array.isArray(d.agents)) { err = "couldn't load subagents, retrying"; return; }
+			agents = d.agents; jobs = Array.isArray(d.jobs) ? d.jobs : jobs; err = "";
+		} catch { err = "offline, retrying"; }
 	}
 	poll();
 	const timer = setInterval(() => { if (!document.hidden) poll(); }, 4000);
