@@ -30,7 +30,7 @@ export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Pro
 			.on('meta[property="og:image"]', set(`${url.origin}/s/og.png`))
 			.transform(await asset("/secret"));
 	}
-	if (pathname === "/files.json" || pathname === "/file") return files(req, env, url);
+	if (pathname === "/files.json" || pathname === "/file" || pathname.startsWith("/file/")) return files(req, env, url);
 	if (pathname === "/box") {
 		const box = env.BOX;
 		const b = box.getByName("main");

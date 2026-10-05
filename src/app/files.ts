@@ -22,11 +22,54 @@ const fail = (o: Out) => new Response(o.error ?? "error", { status: o.status ?? 
 
 const bytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
-/** GET /files.json?path= (no path: the roots) and GET /file?path=&offset=&length=&dl=1. */
+/** /file/<path> maps to a box path: /file/scratch/x -> /scratch/x, /file/workspace/x and /file/x -> /workspace/x. */
+const boxPath = (rest: string) => {
+	const p = rest.split("/").map((x) => { try { return decodeURIComponent(x); } catch { return x; } }).join("/");
+	return /^(scratch|workspace)(\/|$)/.test(p) ? "/" + p : "/workspace/" + p;
+};
+
+const HTML = /^(text\/html|application\/xhtml\+xml)$/;
+/** Subresource types a page may load from next to it (CSS, JS, fonts, media). Others go as plain text. */
+const ASSET = /^(text\/(css|javascript)|application\/(javascript|json|wasm)|font\/[\w.+-]+|image\/[\w.+-]+|audio\/[\w.+-]+|video\/[\w.+-]+|application\/pdf)$/;
+
+/** GET /file/<path>: a file served full page (HTML for phones). HTML runs in an opaque-origin sandbox: scripts yes, app cookies/API/storage no. */
+const page = async (env: EdgeEnv, url: URL): Promise<Response> => {
+	const rest = url.pathname.slice("/file/".length), path = boxPath(rest);
+	const o = await box(env, { op: "read", path });
+	if (o.error) return fail(o);
+	let mime = o.mime ?? "";
+	if (/\.m?js$/i.test(path)) mime = "text/javascript";
+	const html = HTML.test(mime) || /\.x?html?$/i.test(path);
+	const h = new Headers({ "x-content-type-options": "nosniff", "cache-control": "private, no-store", "referrer-policy": "no-referrer", "cross-origin-opener-policy": "same-origin" });
+	if (html) {
+		// Relative assets: only this file's folder on this site. No connect-src: no fetch/XHR/WebSocket to the app API.
+		const dir = url.origin + url.pathname.replace(/[^/]*$/, "");
+		h.set("content-type", "text/html; charset=utf-8");
+		h.set("content-security-policy", [
+			"sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-downloads",
+			"default-src 'none'",
+			"script-src 'unsafe-inline' 'unsafe-eval' " + dir + " blob:",
+			"style-src 'unsafe-inline' " + dir,
+			"img-src data: blob: " + dir,
+			"font-src data: " + dir,
+			"media-src data: blob: " + dir,
+			"frame-src data: blob: " + dir,
+			"connect-src 'none'", "form-action 'none'", "base-uri 'none'",
+			"frame-ancestors " + url.origin,
+		].join("; "));
+	} else {
+		h.set("content-type", ASSET.test(mime) ? (mime.startsWith("text/") ? mime + "; charset=utf-8" : mime) : "text/plain; charset=utf-8");
+		if (mime !== "application/pdf") h.set("content-security-policy", "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'");
+	}
+	return new Response(bytes(o.b64 ?? ""), { headers: h });
+};
+
+/** GET /files.json?path= (no path: the roots), GET /file?path=&offset=&length=&dl=1, GET /file/<path>. */
 export const files = async (req: Request, env: EdgeEnv, url: URL): Promise<Response> => {
 	if (req.method !== "GET") return new Response("method not allowed", { status: 405 });
 	// Behind Cloudflare Access like the rest of the app; refuse if Access isn't in front (except local dev).
 	if (!req.headers.get("cf-access-jwt-assertion") && !/^(localhost|127\.0\.0\.1)$/.test(url.hostname)) return new Response("forbidden", { status: 403 });
+	if (url.pathname.startsWith("/file/")) return page(env, url);
 	const q = url.searchParams, path = q.get("path") ?? "";
 	if (url.pathname === "/files.json") {
 		const o = await box(env, path ? { op: "list", path } : { op: "roots" });

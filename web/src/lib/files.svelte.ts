@@ -31,3 +31,5 @@ export const resolve = (base: string, rel: string) => {
 	return "/" + out.join("/");
 };
 export const raw = (path: string, extra = "") => `/file?path=${encodeURIComponent(path)}${extra}`;
+/** Full-page URL for a box path: /workspace/x -> /file/x, /scratch/x -> /file/scratch/x. */
+export const pageUrl = (path: string) => "/file/" + path.replace(/^\/workspace\//, "").replace(/^\/+/, "").split("/").map(encodeURIComponent).join("/");

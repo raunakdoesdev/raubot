@@ -3,7 +3,7 @@
 	import { ChevronRight, Download, ExternalLink, FileText, Folder, X } from "@lucide/svelte";
 	import { Button } from "$lib/components/ui/button";
 	import { doc, highlight, langOf } from "$lib/md";
-	import { closeFile, openFile, raw, resolve, viewer } from "$lib/files.svelte";
+	import { closeFile, openFile, pageUrl, raw, resolve, viewer } from "$lib/files.svelte";
 
 	type Entry = { name: string; dir: boolean; size: number; mtime: number };
 	type View =
@@ -11,9 +11,9 @@
 		| { kind: "dir"; entries: Entry[]; total: number }
 		| { kind: "md"; html: string; size: number; cut: boolean }
 		| { kind: "text"; html: string; text: string; size: number; loaded: number; lang?: string }
-		| { kind: "image" } | { kind: "pdf" } | { kind: "binary"; size: number };
+		| { kind: "image" } | { kind: "pdf" } | { kind: "html" } | { kind: "binary"; size: number };
 
-	const IMG = /\.(png|jpe?g|gif|webp|avif|svg)$/i, PDF = /\.pdf$/i, MD = /\.(md|markdown|mdx)$/i;
+	const IMG = /\.(png|jpe?g|gif|webp|avif|svg)$/i, PDF = /\.pdf$/i, HTML = /\.x?html?$/i, MD = /\.(md|markdown|mdx)$/i;
 	const BIN = /\.(zip|gz|tgz|tar|bin|exe|so|dylib|wasm|woff2?|ttf|otf|mp[34]|mov|webm|docx?|xlsx?|pptx?|sqlite|db)$/i;
 	/** Markdown renders whole up to MD_MAX; text loads in CHUNK ranges. */
 	const MD_MAX = 2 * 2 ** 20, CHUNK = 256 * 1024;
@@ -41,6 +41,7 @@
 		try {
 			if (IMG.test(p)) return void (view = { kind: "image" });
 			if (PDF.test(p)) return void (view = { kind: "pdf" });
+			if (HTML.test(p)) return void (view = { kind: "html" });
 			// Folders: try listing first when the path has no extension.
 			if (!/\.[^/]+$/.test(p) || p.endsWith("/")) {
 				const r = await fetch("/files.json?path=" + encodeURIComponent(p.replace(/\/+$/, "")));
@@ -105,7 +106,7 @@
 				{/each}
 			</nav>
 			{#if view.kind !== "dir"}
-				<Button variant="ghost" size="icon-sm" href={raw(path)} target="_blank" aria-label="open raw" title="Open raw"><ExternalLink /></Button>
+				<Button variant="ghost" size="icon-sm" href={view.kind === "html" ? pageUrl(path) : raw(path)} target="_blank" aria-label="open raw" title={view.kind === "html" ? "Open full page" : "Open raw"}><ExternalLink /></Button>
 				<Button variant="ghost" size="icon-sm" href={raw(path, "&dl=1")} download={name} aria-label="download" title="Download"><Download /></Button>
 			{/if}
 			<Button variant="ghost" size="icon-sm" aria-label="close" title="Close (Esc)" onclick={closeFile}><X /></Button>
@@ -121,6 +122,9 @@
 				{#if view.loaded < view.size}<div class="px-4 pb-6"><Button variant="secondary" size="sm" onclick={more}>Load more ({size(view.loaded)} of {size(view.size)})</Button></div>{/if}
 			{:else if view.kind === "image"}<div class="flex min-h-full items-center justify-center p-4"><img src={raw(path)} alt={name} class="max-h-full max-w-full rounded" /></div>
 			{:else if view.kind === "pdf"}<iframe src={raw(path)} title={name} class="h-full w-full border-0 bg-white"></iframe>
+			{:else if view.kind === "html"}
+				<!-- No allow-same-origin: the page gets an opaque origin, so its JS can't reach the app's cookies, storage or API. -->
+				<iframe src={pageUrl(path)} title={name} sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-downloads" referrerpolicy="no-referrer" class="h-full w-full border-0 bg-white"></iframe>
 			{:else if view.kind === "binary"}<div class="p-6 text-sm text-muted-foreground">Binary file ({size(view.size)}). Use download.</div>
 			{:else if view.kind === "dir"}
 				<ul class="p-2 text-sm">
