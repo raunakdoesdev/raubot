@@ -13,9 +13,9 @@ export type Frozen = { image: Uint8Array; api: number; pending: [number, string,
 export type Freezer = { load(): Promise<Frozen | undefined>; save(f: Frozen): Promise<void> };
 type Store = Record<string, unknown>;
 
-export const describe = (tools: Nested[]) => `Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level \`await\` and \`return\` work. No Node, file system, network, or timers.
+export const describe = (tools: Nested[]) => `Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level \`await\` and \`return\` work. No Node, direct file system or network: use tools.read/edit/write/bash for files. \`setTimeout\`/\`clearTimeout\` work.
 - \`await tools.<name>({ ...args })\` resolves to the tool's text output and rejects with an Error on failure.
-- \`text(value)\`, \`console.log(...)\` and \`return\` add output; \`exit()\` ends the script. \`store(key, value)\` / \`load(key)\` keep JSON values across calls. They are for small state (256 KB in all): write big data such as API dumps to files in /scratch with \`tools.bash\` instead.
+- \`text(value)\`, \`console.log(...)\` and \`return\` add output. \`image(dataUrlOrBlock)\` adds an image you will see, e.g. \`image(await tools.read({ path: "x.png" }))\`. \`notify(text)\` shows a progress line in the app's live trace only. \`exit()\` ends the script. Output over ${OUT_CAP / 1000}k chars is cut in the middle: print summaries, or write big data to a file and page it with tools.read. \`store(key, value)\` / \`load(key)\` keep JSON values across calls. They are for small state (256 KB in all): write big data such as API dumps to files in /scratch with \`tools.bash\` instead.
 - Use it to batch independent calls (Promise.allSettled), chain them, or filter large output, instead of many separate tool calls.
 - Long work you don't need to wait on: pass \`background: { label, timeout }\` (timeout in seconds, required, max 86400) next to \`code\`. The call returns at once with a job id; the script keeps running, even across restarts, and when it ends its result comes back to you as a \`job\` message. \`tools.jobs()\` lists jobs, \`tools.jobs({ cancel: [id] })\` stops some, \`tools.jobs({ prune: true })\` forgets finished ones. At most 100 run at once.
 - Optional first line: \`// @options: {"timeout_ms": 60000}\`
@@ -51,6 +51,18 @@ const at = (path) => new Proxy(() => {}, {
 tools = new Proxy(raw, { get: (o, k) => (typeof k !== "string" || k === "then" || k in o ? o[k] : at([k])) });
 `.replace(/\s*\n\s*/g, " ");
 
+// Runs in the VM: timers are host sleeps, so a script waiting on one isn't "stalled".
+const TIMERS = `
+const __t = new Set(); let __n = 0;
+globalThis.setTimeout = (fn, ms = 0, ...a) => { const id = ++__n; __t.add(id); tools.__sleep({ ms: Number(ms) || 0 }).then(() => { if (__t.delete(id)) fn(...a); }); return id; };
+globalThis.clearTimeout = (id) => { __t.delete(id); };
+globalThis.notify = (v) => { const s = typeof v === "string" ? v : JSON.stringify(v); if (!s || !s.trim()) throw new TypeError("notify expects non-empty text"); tools.__notify({ text: s }); };
+`.replace(/\s*\n\s*/g, " ");
+
+/** Final result text cap: tool results over ~64 KB get rejected or cut upstream. */
+export const OUT_CAP = 50_000;
+const capOut = (s: string) => (s.length <= OUT_CAP ? s : `${s.slice(0, OUT_CAP * 0.6)}\n…[${s.length - OUT_CAP} chars cut: print less, or write it to a file in /scratch and page it with tools.read({ path, offset })]…\n${s.slice(-OUT_CAP * 0.4)}`);
+
 const opts = (deadline: number, finished: () => boolean, signal?: AbortSignal) => ({
 	wasm, memoryLimit: 256 << 20, maxStackSize: MAX_STACK_SIZE, wasi: discard as never,
 	interruptHandler: () => finished() || Date.now() > deadline || !!signal?.aborted,
@@ -62,8 +74,11 @@ export async function codemode(source: string, nested: Nested[], store: Store, s
 	const frozen = await freezer?.load();
 	const deadline = frozen?.deadline ?? until ?? Date.now() + Math.min(options.timeoutMs ?? 120_000, 600_000);
 	const byName = new Map(nested.map((t) => [t.name, t]));
+	byName.set("__sleep", { name: "__sleep", description: "", inputSchema: {}, execute: (({ ms }: { ms: number }) => new Promise((r) => setTimeout(r, Math.max(0, Math.min(ms, deadline - Date.now()))))) as Nested["execute"] });
+	byName.set("__notify", { name: "__notify", description: "", inputSchema: {}, execute: (async () => "ok") as Nested["execute"] });
 	if (app) byName.set("__app", { name: "__app", description: "", inputSchema: {}, execute: (({ path, args }: { path: string[]; args: unknown }) => app(path, args)) as Nested["execute"] });
 	const output: string[] = frozen?.output ?? [];
+	const images: { data: string; mimeType: string }[] = [];
 	const pending = new Map<number, [string, unknown]>();
 	let finished = false, dirty = false;
 	let done!: (r: { ok: true; value?: string; writes: string } | { ok: false; error: string }) => void;
@@ -93,7 +108,10 @@ export async function codemode(source: string, nested: Nested[], store: Store, s
 		const bridge: Parameters<typeof vm.newFunction>[1] = (kind, a, b, c) => {
 			const k = kind.toString();
 			if (k === "call" || k === "global") call(a.toNumber(), b.toString(), c === undefined || c.isUndefined ? undefined : JSON.parse(c.toString()));
-			else if (k === "output") output.push(a.toString() === "image" ? "[image]" : b.toString());
+			else if (k === "output") {
+				if (a.toString() === "image") { images.push({ data: b.toString(), mimeType: c.toString() }); output.push(`[image ${images.length}]`); }
+				else output.push(b.toString());
+			}
 			else if (k === "done") done(a.toBoolean() ? { ok: true, value: b === undefined || b.isUndefined ? undefined : b.toString(), writes: c.toString() } : { ok: false, error: b.toString() });
 			return vm.undefined;
 		};
@@ -108,7 +126,7 @@ export async function codemode(source: string, nested: Nested[], store: Store, s
 			api = vm.withScope((s) => s.escape(vm.callFunction(vm.evalCode(PRELUDE_SOURCE, "codemode-prelude.js"), vm.undefined, fnBridge,
 				vm.newString(JSON.stringify(tools)), vm.newString("[]"), vm.newString(JSON.stringify(saved)))));
 			try {
-				const fn = vm.evalCode(`(async (tools, console) => {${app ? MOUNT : ""}${code}\n})`, "codemode.js");
+				const fn = vm.evalCode(`(async (tools, console) => {${TIMERS}${app ? MOUNT : ""}${code}\n})`, "codemode.js");
 				vm.callFunction(api.getProp("run"), api, fn).dispose();
 				fn.dispose();
 				drain();
@@ -133,9 +151,9 @@ export async function codemode(source: string, nested: Nested[], store: Store, s
 		const r = await Promise.race([result, timer]).catch((e: Error) => ({ ok: false as const, error: e.message }));
 		finished = true;
 		const out = output.join("\n");
-		if (!r.ok) return { text: `Script failed\n${out}${out ? "\n" : ""}Script error: ${why(r.error)}`, error: true };
+		if (!r.ok) return { text: capOut(`Script failed\n${out}${out ? "\n" : ""}Script error: ${why(r.error)}`), error: true, images };
 		for (const [k, v] of JSON.parse(r.writes) as [string, string | undefined][]) v === undefined ? delete store[k] : (store[k] = JSON.parse(v));
-		return { text: `Script completed\n${out}${r.value !== undefined ? `${out ? "\n" : ""}${r.value}` : ""}`, error: false };
+		return { text: capOut(`Script completed\n${out}${r.value !== undefined ? `${out ? "\n" : ""}${r.value}` : ""}`), error: false, images };
 	} catch (e) {
 		finished = true;
 		return { text: `Script failed\nScript error: ${e instanceof Error ? e.message : String(e)}`, error: true };

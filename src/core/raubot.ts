@@ -28,6 +28,8 @@ import { agent, agents, catalog, type AgentHost, type Info as AgentInfo } from "
 import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, acknowledge, idle, send as deliver, tag, uploadName, uploads } from "./channels/index.ts";
 import * as frozen from "./freezer.ts";
 import { bash, Box, BoxLive, runner, Storage, write } from "./fx.ts";
+import * as files from "./files.ts";
+import { MAX_BYTES, MAX_LINES } from "./files.ts";
 import { JobHost, Jobs, JobsLive } from "./jobs.ts";
 import { OAuth } from "./oauth.ts";
 import { redact, Secrets, SecretsLive } from "./secrets.ts";
@@ -179,11 +181,42 @@ export class Raubot extends DurableObject<Env> implements Core {
 		const nested: Nested[] = [
 			{
 				name: "bash",
-				description: "Run a bash command in your Linux box (cwd /workspace). Output is combined stdout+stderr with the exit code. Default timeout 120s, max 900s. Your secrets are env vars in every command.",
-				inputSchema: Type.Object({ cmd: Type.String(), timeout: Type.Optional(Type.Integer()) }),
-				execute: ({ cmd, timeout }: { cmd: string; timeout?: number }) => this.#fx(Effect.gen(function* () {
+				description: "Run a bash command in your Linux box (cwd /workspace). Pass the command as cmd (or command, as in pi). Output is combined stdout+stderr with the exit code, cut in the middle past 30k chars. Default timeout 120s, max 900s. Your secrets are env vars in every command. To read, change or create files, prefer tools.read/edit/write over cat, sed and heredocs.",
+				inputSchema: Type.Object({ cmd: Type.Optional(Type.String()), command: Type.Optional(Type.String()), timeout: Type.Optional(Type.Integer()) }),
+				execute: ({ cmd, command, timeout }: { cmd?: string; command?: string; timeout?: number }) => this.#fx(Effect.gen(function* () {
+					const c = cmd ?? command;
+					if (typeof c !== "string") return yield* Effect.fail(new Error("bash needs cmd (or command)"));
 					const env = yield* Effect.flatMap(Secrets, (s) => s.env());
-					return redact(env, yield* bash(cmd, Math.min(timeout ?? 120, 900), env));
+					return redact(env, yield* bash(c, Math.min(timeout ?? 120, 900), env));
+				})),
+			},
+			{
+				name: "read",
+				description: `Read a file in your box (path absolute, or relative to /workspace). Text comes back as "N<tab>line" rows, at most ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB per call; then a hint gives the offset to continue. offset is the 1-indexed first line, limit the line count. Images (png, jpeg, gif, webp) come back as { type: "image", mimeType, data, image_url, path, size, dims }, shrunk to 2000px if bigger: pass it to image(...) to look at it.`,
+				inputSchema: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Integer()), limit: Type.Optional(Type.Integer()) }),
+				execute: (args: { path: string; offset?: number; limit?: number }) => this.#fx(Effect.gen(function* () {
+					const env = yield* Effect.flatMap(Secrets, (s) => s.env());
+					const box = yield* Box;
+					const r = yield* Effect.tryPromise({ try: () => files.read((c, i, t) => Effect.runPromise(box.exec(c, i, t)), args), catch: (e) => e as Error });
+					return typeof r === "string" ? redact(env, r) : r;
+				})),
+			},
+			{
+				name: "edit",
+				description: "Edit a file in your box with exact-text replacements: edits: [{ oldText, newText }]. Each oldText must match the original file exactly (whitespace and newlines too) and be unique in it; edits must not overlap. Fails, changing nothing, if one is missing or not unique. Keeps the file's line endings and BOM. Returns a line-numbered diff.",
+				inputSchema: Type.Object({ path: Type.String(), edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })) }),
+				execute: (args: { path: string; edits: { oldText: string; newText: string }[] }) => this.#fx(Effect.gen(function* () {
+					const box = yield* Box;
+					return yield* Effect.tryPromise({ try: () => files.edit((c, i, t) => Effect.runPromise(box.exec(c, i, t)), (p, b) => Effect.runPromise(box.write(p, b)), args), catch: (e) => e as Error });
+				})),
+			},
+			{
+				name: "write",
+				description: "Write a file in your box (path absolute, or relative to /workspace), creating parent directories and overwriting it. content is the full text. Use edit for changes to an existing file.",
+				inputSchema: Type.Object({ path: Type.String(), content: Type.String() }),
+				execute: (args: { path: string; content: string }) => this.#fx(Effect.gen(function* () {
+					const box = yield* Box;
+					return yield* Effect.tryPromise({ try: () => files.write((p, b) => Effect.runPromise(box.write(p, b)), args), catch: (e) => e as Error });
 				})),
 			},
 			{
@@ -299,7 +332,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 					finally { t.end(r?.error !== false); }
 					await freezer.clear();
 					if (!r.error) await this.ctx.storage.put("codemode-store", store);
-					return { content: [{ type: "text", text: r.text }], isError: r.error };
+					return { content: [{ type: "text" as const, text: r.text }, ...(r.images ?? []).map((i) => ({ type: "image" as const, ...i }))], isError: r.error };
 				},
 			})],
 			hooks: [hook(GenerationTask, {
