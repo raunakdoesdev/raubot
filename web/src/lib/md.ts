@@ -21,10 +21,16 @@ marked.use({ renderer: { code, image } });
 
 /** Paths into the box that the file panel can open (not inside tags or existing links). */
 const PATH = /(?<![\w./-])(\/(?:workspace|scratch)\/[^\s<>"'`)\]&]*[^\s<>"'`)\]&.,;:!?])/g;
+/** External links (http/https, other origin) open in a new tab, so the chat never navigates away. */
+const EXT_A = /^<a\s(?![^>]*\btarget=)(?![^>]*\bdata-file=)[^>]*\bhref="(https?:\/\/[^"]*)"/i;
+const external = (href: string) => { try { return new URL(href.replace(/&amp;/g, "&"), location.href).origin !== location.origin; } catch { return true; } };
 export const linkPaths = (html: string) => {
 	let inA = 0;
 	return html.split(/(<[^>]+>)/).map((part) => {
-		if (part.startsWith("<")) { if (/^<a[\s>]/i.test(part)) inA++; else if (/^<\/a>/i.test(part)) inA = Math.max(0, inA - 1); return part; }
+		if (part.startsWith("<")) {
+			const m = EXT_A.exec(part);
+			if (m && external(m[1])) part = part.replace(/^<a\s/i, '<a target="_blank" rel="noopener noreferrer" ');
+			if (/^<a[\s>]/i.test(part)) inA++; else if (/^<\/a>/i.test(part)) inA = Math.max(0, inA - 1); return part; }
 		return inA ? part : part.replace(PATH, (p) => `<a href="#file=${encodeURIComponent(p)}" data-file="${p}" class="file-link">${p}</a>`);
 	}).join("");
 };

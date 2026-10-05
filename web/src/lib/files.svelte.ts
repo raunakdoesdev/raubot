@@ -17,10 +17,24 @@ addEventListener("hashchange", fromHash);
 // One delegated listener: any element with data-file (chat, transcripts, documents) opens the panel.
 document.addEventListener("click", (e) => {
 	if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
-	const a = (e.target as Element | null)?.closest?.("[data-file]");
-	if (!a) return;
+	const t = e.target as Element | null;
+	const a = t?.closest?.("[data-file]");
+	if (a) { e.preventDefault(); openFile(a.getAttribute("data-file")!); return; }
+	// Plain links (chat, transcripts, trace rows): same-origin /file/<path> opens the panel; other origins open a new tab.
+	const l = t?.closest?.("a[href]") as HTMLAnchorElement | null;
+	if (!l || l.hasAttribute("download") || (l.target && l.target !== "_self")) return;
+	let u: URL;
+	try { u = new URL(l.href); } catch { return; }
+	if (u.origin === location.origin) {
+		if (!u.pathname.startsWith("/file/")) return;
+		const rel = u.pathname.slice(6).split("/").map((s) => { try { return decodeURIComponent(s); } catch { return s; } }).join("/");
+		e.preventDefault();
+		openFile(rel.startsWith("scratch/") ? "/" + rel : "/workspace/" + rel);
+		return;
+	}
+	if (u.protocol !== "http:" && u.protocol !== "https:") return;
 	e.preventDefault();
-	openFile(a.getAttribute("data-file")!);
+	window.open(u.href, "_blank", "noopener,noreferrer");
 });
 
 /** Resolves a relative link in a document against its folder. */
