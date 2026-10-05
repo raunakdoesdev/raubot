@@ -9,7 +9,9 @@
 	import SecretForm from "$lib/SecretForm.svelte";
 	import Sidebar from "$lib/Sidebar.svelte";
 	import AgentView from "$lib/AgentView.svelte";
-	import { md } from "$lib/md";
+	import FilePanel from "$lib/FilePanel.svelte";
+	import { linkPaths, md } from "$lib/md";
+	const plain = (s: string) => linkPaths(s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"));
 
 	type Line = { i: number; kind: string; text: string; date?: number };
 	/** `body` is the call line; `echo` its result; codemode rows carry their `code` and `hash` (matched to a live trace), job rows their `job` id. */
@@ -114,7 +116,7 @@
 		<div class="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
 			{#each items as x (x.i)}
 				{#if x.kind === "user"}
-					<div class="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap [overflow-wrap:anywhere]" title="#{x.i}">{x.text}</div>
+					<div class="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap [overflow-wrap:anywhere]" title="#{x.i}">{@html plain(x.text)}</div>
 				{:else if x.kind === "talk"}
 					<div class="md" title="#{x.i}">{@html md(x.text)}</div>
 				{:else}
@@ -151,3 +153,4 @@
 	</form>
 </div>
 </div>
+<FilePanel />
