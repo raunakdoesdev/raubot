@@ -19,6 +19,7 @@ const used = new Map(); // value -> ref, scrubbed from output
 let saving = Promise.resolve();
 async function onUse(p, n, from) {
 	p.counter = String(n);
+	console.log(new Date().toISOString(), "passkey used", p.rpId, n);
 	for (const a of tabs.values()) if (a !== from) await a.set(keys).catch(() => {});
 	saving = saving.then(() => vault.counted(env, p.credentialId, n)).catch((e) => console.error("counter", e.message));
 }
