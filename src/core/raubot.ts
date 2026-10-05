@@ -155,7 +155,9 @@ export class Raubot extends DurableObject<Env> implements Core {
 				: model.api === "openai-responses" ? { ...options, onPayload: responses } : options);
 		const compactor = models.getModel("openrouter", this.env.COMPACT_MODEL)!;
 		this.memory = new Memory(this.ctx.storage.sql, async (systemPrompt, prompt) => {
+			const t0 = Date.now();
 			const r = await models.completeSimple(compactor, { systemPrompt, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, { reasoning: "low", signal: AbortSignal.timeout(90_000) });
+			console.log("compact call", JSON.stringify({ ms: Date.now() - t0, bytes: prompt.length, stop: r.stopReason, ...r.usage, cost: r.usage.cost?.total }));
 			if (r.stopReason === "error" || r.stopReason === "aborted") throw new Error(r.errorMessage ?? r.stopReason);
 			return text(r.content);
 		}, () => this.#changed());
