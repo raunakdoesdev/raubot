@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { tick } from "svelte";
-	import { ArrowUp, ChevronRight, Paperclip, Settings, Square, X } from "@lucide/svelte";
+	import { ArrowUp, ChevronRight, PanelLeft, Paperclip, Settings, Square, X } from "@lucide/svelte";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import * as Collapsible from "$lib/components/ui/collapsible";
 	import Header from "$lib/Header.svelte";
 	import SecretForm from "$lib/SecretForm.svelte";
+	import Sidebar from "$lib/Sidebar.svelte";
+	import AgentView from "$lib/AgentView.svelte";
 	import { md } from "$lib/md";
 
 	type Line = { i: number; kind: string; text: string };
@@ -18,6 +20,7 @@
 	let text = $state(""), files = $state<string[]>([]), uploading = $state(0);
 	let main: HTMLElement, box: HTMLTextAreaElement, picker: HTMLInputElement, ws: WebSocket;
 	let open: { name: string; at: number }[] = [];
+	let selected = $state(0), menu = $state(false);
 
 	const strip = (s: string) => s.replace(/^\[(via \w+|iMessage)\] /, "");
 	const canSend = $derived(!uploading && (text.trim().length > 0 || files.length > 0));
@@ -87,8 +90,12 @@
 	};
 </script>
 
-<div class="flex h-dvh flex-col overflow-hidden">
+<div class="flex h-dvh overflow-hidden">
+<Sidebar bind:selected bind:open={menu} />
+{#if selected}{#key selected}<AgentView id={selected} onmenu={() => (menu = true)} />{/key}{/if}
+<div class="flex h-dvh min-w-0 flex-1 flex-col overflow-hidden" class:hidden={selected !== 0}>
 	<Header>
+		{#snippet lead()}<Button variant="ghost" size="icon-sm" class="md:hidden" aria-label="menu" onclick={() => (menu = true)}><PanelLeft /></Button>{/snippet}
 		<span class="truncate text-sm text-muted-foreground">{status}</span>
 		<Button href="/settings" variant="ghost" size="icon-sm" aria-label="settings"><Settings /></Button>
 	</Header>
@@ -141,4 +148,5 @@
 		</div>
 		<input bind:this={picker} type="file" multiple hidden onchange={pick} />
 	</form>
+</div>
 </div>
