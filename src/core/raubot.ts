@@ -24,7 +24,7 @@ import { type App, codemode, describe, type Freezer, type Nested } from "./codem
 import { Mcp } from "./mcp.ts";
 import { serve } from "../app/index.ts";
 import type { AgentLine, AgentRow, Core, CoreEvent } from "./api.ts";
-import { agent, agents, catalog, type AgentHost, type Info as AgentInfo } from "./agents.ts";
+import { agent, agents, APPROVED, catalog, type AgentHost, type Info as AgentInfo } from "./agents.ts";
 import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, acknowledge, idle, send as deliver, tag, uploadName, uploads } from "./channels/index.ts";
 import * as frozen from "./freezer.ts";
 import { bash, Box, BoxLive, runner, Storage, write } from "./fx.ts";
@@ -582,12 +582,14 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			},
 			steer: async (id, message) => void (await (await conv(id)).submit({ type: "input", content: message, whenBusy: "steer" }, C)),
 			stop: async (id) => (await conv(id)).abort(C),
-			needless: async (reply) => {
-				const r = await this.env.AI.run("@cf/cloudflare/clef" as keyof AiModels, { model: "clef", state: reply.slice(-4000), questions: CONFIRM } as never) as unknown as { answers: { asks: { noul: number }; about: { choice: string } } };
-				return r.answers.asks.noul > 0.5 && r.answers.about.choice === "other";
-			},
+			needless: (reply) => this.#needless(reply),
 		};
 		return host;
+	}
+
+	async #needless(text: string) {
+		const r = await this.env.AI.run("@cf/cloudflare/clef" as keyof AiModels, { model: "clef", state: text.slice(-4000), questions: CONFIRM } as never) as unknown as { answers: { asks: { noul: number }; about: { choice: string } } };
+		return r.answers.asks.noul > 0.5 && r.answers.about.choice === "other";
 	}
 
 	#boxOf(conv: unknown) { return conv === this.root.id ? "main" : `agent-${conv}`; }
@@ -908,6 +910,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	#message(own: boolean) {
 		return async ({ text, channel = "imessage", files = [] }: { text: string; channel?: string; files?: string[] }) => {
 			const paths = files.map((f) => (f.startsWith("/") ? f : `/workspace/${f}`));
+			// A job or subagent texting the user for a needless approval (a captcha, a login) gets it from Clef instead.
+			if (!own && (await this.#needless(text).catch(() => false))) {
+				console.log("auto-approved", JSON.stringify({ text: text.slice(0, 200) }));
+				return `Not sent: ${APPROVED} Solve captchas yourself in the browser.`;
+			}
 			if (channel === APP.channel) this.#log("talk", text, Date.now());
 			else {
 				await this.#fx(deliver(this.#channels, await this.#origin(channel), text, paths));

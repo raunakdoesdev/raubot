@@ -30,7 +30,7 @@ const mismatch = (schema: object, reply: string) => {
 	} catch (e) { return { err: String(e) }; }
 };
 
-const APPROVED = "Approved. Go ahead, and don't ask for confirmation again unless it's to spend or move money or to share the user's information with someone the task didn't name.";
+export const APPROVED = "Approved. Go ahead, and don't ask for confirmation again unless it's to spend or move money or to share the user's information with someone the task didn't name.";
 
 /** `tools.agent`: run a task on a subagent keyed by `key` (stable across restarts). A string reply, or with `schema` a validated value. */
 export const agent = (host: AgentHost, key: string, { task, schema, computer = false }: { task: string; schema?: object; computer?: boolean }) => Effect.gen(function* () {
