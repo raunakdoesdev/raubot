@@ -3,15 +3,17 @@
 	import { ArrowUp, ChevronRight, PanelLeft, Paperclip, Settings, Square, X } from "@lucide/svelte";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
-	import * as Collapsible from "$lib/components/ui/collapsible";
+	import ToolRow from "$lib/ToolRow.svelte";
+	import { parseTool, traces } from "$lib/traces.svelte";
 	import Header from "$lib/Header.svelte";
 	import SecretForm from "$lib/SecretForm.svelte";
 	import Sidebar from "$lib/Sidebar.svelte";
 	import AgentView from "$lib/AgentView.svelte";
 	import { md } from "$lib/md";
 
-	type Line = { i: number; kind: string; text: string };
-	type Tool = { kind: "tool"; i: number; name: string; head: string; body: string };
+	type Line = { i: number; kind: string; text: string; date?: number };
+	/** `body` is the call line; `echo` its result; codemode rows carry their `code` and `hash` (matched to a live trace), job rows their `job` id. */
+	type Tool = { kind: "tool"; i: number; name: string; head: string; body: string; arg?: string; code?: string; hash?: string; echo?: string; date?: number; job?: number };
 	type Item = { kind: "user" | "talk"; i: number; text: string } | Tool;
 	type Ask = { token: string; name: string; why: string };
 
@@ -30,22 +32,28 @@
 	function add(x: Line) {
 		if (x.kind === "job") {
 			const t = strip(x.text);
-			items.push({ kind: "tool", i: x.i, name: "job", head: t.split("\n")[0], body: t });
+			const head = t.split("\n")[0], job = Number(/\[job (\d+)/.exec(head)?.[1]);
+			items.push({ kind: "tool", i: x.i, name: "job", head, body: "", arg: head, echo: t, job: Number.isFinite(job) ? job : undefined });
 		} else if (x.kind === "tool" || x.kind === "echo") {
 			const name = x.text.split(/[\s:]/)[0], result = `→ ${x.text.slice(name.length + 1).trim().split("\n")[0]}`;
 			const j = x.kind === "echo" ? open.findIndex((o) => o.name === name) : -1;
 			if (j >= 0) {
 				const t = items[open.splice(j, 1)[0].at] as Tool;
-				t.head = result; t.body += `\n\n${x.text}`;
+				t.head = result; t.echo = x.text.slice(name.length + 2);
 				return;
 			}
-			items.push({ kind: "tool", i: x.i, name, head: x.kind === "echo" ? result : "", body: x.text });
+			const p = x.kind === "tool" ? parseTool(x.text) : undefined;
+			items.push({ kind: "tool", i: x.i, name, head: x.kind === "echo" ? result : "", body: x.kind === "tool" ? x.text : "", echo: x.kind === "echo" ? x.text.slice(name.length + 2) : "", arg: p?.arg ?? result, code: p?.code, hash: p?.hash, date: x.date });
 			if (x.kind === "tool") open.push({ name, at: items.length - 1 });
 		} else {
 			open = [];
 			items.push({ kind: x.kind === "user" ? "user" : "talk", i: x.i, text: x.kind === "user" ? strip(x.text) : x.text });
 		}
 	}
+
+	// Tool rows -> their traced runs (by code hash, nearest start after the row's time).
+	const runFor = $derived(traces.match(items.flatMap((x) => (x.kind === "tool" && x.hash ? [{ key: x.i, hash: x.hash, date: x.date ?? 0 }] : [])), "main"));
+	const loadTraces = () => fetch("/traces.json").then((r) => (r.ok ? r.json() : [])).then((l) => traces.merge(l, "main")).catch(() => {});
 
 	const near = () => !main || main.scrollHeight - main.scrollTop - main.clientHeight < 120;
 	const down = async (force = false) => { if (force || near()) { await tick(); main.scrollTop = main.scrollHeight; } };
@@ -54,6 +62,7 @@
 		ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
 		ws.onmessage = (e) => {
 			const m = JSON.parse(e.data), stick = near();
+			if (m.trace) traces.apply(m.trace);
 			if (m.asks) asks = m.asks;
 			if (m.queued) queued = m.queued;
 			if (m.history) { for (const x of m.history) add(x); partial = ""; }
@@ -63,6 +72,7 @@
 			if (m.error) note = m.error;
 			if (stick) down(true);
 		};
+		ws.onopen = loadTraces;
 		ws.onclose = () => setTimeout(() => { items = []; open = []; connect(); }, 1000);
 	}
 	connect();
@@ -108,16 +118,7 @@
 				{:else if x.kind === "talk"}
 					<div class="md" title="#{x.i}">{@html md(x.text)}</div>
 				{:else}
-					<Collapsible.Root class="-my-2">
-						<Collapsible.Trigger class="group flex w-full min-w-0 items-center gap-1.5 py-1 text-left font-mono text-xs text-muted-foreground hover:text-foreground">
-							<ChevronRight class="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
-							<span class="shrink-0 text-foreground/70">{x.name}</span>
-							<span class="truncate">{x.head}</span>
-						</Collapsible.Trigger>
-						<Collapsible.Content>
-							<pre class="mt-1.5 max-h-[50vh] overflow-auto rounded-lg border bg-card p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-muted-foreground [overflow-wrap:anywhere]">{x.body}</pre>
-						</Collapsible.Content>
-					</Collapsible.Root>
+					<ToolRow name={x.name} arg={x.arg ?? x.head} code={x.code} body={x.code ? "" : x.body} echo={x.echo} run={x.job !== undefined ? traces.byJob(x.job) : runFor.get(x.i)} />
 				{/if}
 			{/each}
 			{#each queued as q, k (k)}<div class="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap opacity-60 [overflow-wrap:anywhere]">{strip(q)}</div>{/each}

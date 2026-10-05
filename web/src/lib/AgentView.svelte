@@ -5,6 +5,8 @@
 	import * as Collapsible from "$lib/components/ui/collapsible";
 	import Header from "$lib/Header.svelte";
 	import { md } from "$lib/md";
+	import ToolRow from "$lib/ToolRow.svelte";
+	import { fnv, summary, traces } from "$lib/traces.svelte";
 
 	type Line = { role: "user" | "assistant" | "tool" | "result"; text: string; name?: string };
 	type Agent = { id: number; task: string; computer: boolean; status: "running" | "idle"; started: string; last: string };
@@ -25,6 +27,15 @@
 			first = false;
 		} catch (e) { note = String(e).slice(0, 160); }
 	}
+	// Its traced script runs (polled; only raubot's own stream over the socket). Tool rows match them by code hash, newest back.
+	const scope = `agent:${id}`;
+	const pollTraces = () => fetch(`/traces.json?conv=${id}`).then((r) => (r.ok ? r.json() : [])).then((l) => traces.merge(l, scope)).catch(() => {});
+	const codeOf = (x: Line) => (x.role === "tool" && x.name === "codemode" ? x.text : "");
+	const runFor = $derived(traces.matchTail(lines.flatMap((x, k) => (codeOf(x) ? [{ key: k, hash: fnv(x.text) }] : [])), scope));
+	const echoAfter = (k: number) => (lines[k + 1]?.role === "result" ? lines[k + 1].text : "");
+	pollTraces();
+	const ttimer = setInterval(() => { if (!document.hidden) pollTraces(); }, 3000);
+	onDestroy(() => clearInterval(ttimer));
 	poll();
 	const timer = setInterval(() => { if (!document.hidden) poll(); }, 3000);
 	onDestroy(() => clearInterval(timer));
@@ -70,17 +81,11 @@
 					</Collapsible.Root>
 				{:else if x.role === "assistant"}
 					<div class="md">{@html md(x.text)}</div>
-				{:else}
-					<Collapsible.Root class="-my-2">
-						<Collapsible.Trigger class="group flex w-full min-w-0 items-center gap-1.5 py-1 text-left font-mono text-xs text-muted-foreground hover:text-foreground">
-							<ChevronRight class="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
-							<span class="shrink-0 text-foreground/70">{x.role === "tool" ? x.name : "→"}</span>
-							<span class="truncate">{x.text.split("\n")[0]}</span>
-						</Collapsible.Trigger>
-						<Collapsible.Content>
-							<pre class="mt-1.5 max-h-[50vh] overflow-auto rounded-lg border bg-card p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-muted-foreground [overflow-wrap:anywhere]">{x.text}</pre>
-						</Collapsible.Content>
-					</Collapsible.Root>
+				{:else if x.role === "tool"}
+					{#if codeOf(x)}<ToolRow name="codemode" arg={summary(x.text)} code={x.text} echo={echoAfter(k)} run={runFor.get(k)} live={false} />
+					{:else}<ToolRow name={x.name ?? "tool"} arg={x.text.split("\n")[0]} body={x.text} echo={echoAfter(k)} />{/if}
+				{:else if lines[k - 1]?.role !== "tool"}
+					<ToolRow name={"→ " + (x.name ?? "")} arg={x.text.split("\n")[0]} echo={x.text} />
 				{/if}
 			{/each}
 			{#if agent?.status === "running"}<div class="text-sm text-muted-foreground">working…</div>{/if}
