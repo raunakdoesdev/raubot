@@ -16,7 +16,7 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
-import { BROWSER, COMPUTER, EXECUTOR, MARKS, MASTER, SELF, SUBAGENT, VIEW, VIEW_DOC } from "./prompts.ts";
+import { BROWSER, COMPUTER, EXECUTOR, MARKS, MASTER, SELF, SETTLE, SUBAGENT, VIEW, VIEW_DOC } from "./prompts.ts";
 import { browse, responses } from "./computer.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Computer } from "./box.ts";
@@ -155,7 +155,7 @@ export class Raubot extends DurableObject<Env> implements Core {
 				: model.api === "openai-responses" ? { ...options, onPayload: responses } : options);
 		const compactor = models.getModel("openrouter", this.env.COMPACT_MODEL)!;
 		this.memory = new Memory(this.ctx.storage.sql, async (systemPrompt, prompt) => {
-			const r = await models.completeSimple(compactor, { systemPrompt, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, { reasoning: "low" });
+			const r = await models.completeSimple(compactor, { systemPrompt, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, { reasoning: "low", signal: AbortSignal.timeout(90_000) });
 			if (r.stopReason === "error" || r.stopReason === "aborted") throw new Error(r.errorMessage ?? r.stopReason);
 			return text(r.content);
 		}, () => this.#changed());
@@ -318,6 +318,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		await this.#sync();
 		this.memory.pump();
 		this.#changed();
+		void this.#drain().catch((e) => console.error("drain", e));
 	}
 
 	#serial<T>(op: () => Promise<T>): Promise<T> {
@@ -500,12 +501,31 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			await this.ctx.storage.put("reply", { ...from, start: this.memory.log.length });
 		}
 		if (this.busy()) return void (await this.root.submit({ type: "input", content: input, whenBusy: "steer" }, C));
+		const queued = [...await this.#queued(), input];
+		await this.ctx.storage.put("inbox", queued);
+		this.#broadcast({ queued });
+		void this.#drain().catch((e) => this.#broadcast({ error: String(e) }));
+	}
+
+	async #queued() { return (await this.ctx.storage.get<string[]>("inbox")) ?? []; }
+
+	/** Starts a turn for the saved inbox, waiting briefly for summaries; unfinished view lines go in as "(summarizing...)". */
+	async #drain() {
 		await this.#serial(async () => {
-			this.#broadcast({ status: "settling" });
-			await this.memory.settle();
-			this.memory.set("pinned", this.memory.render());
-			await this.root.reset(undefined, C);
-			await this.root.submit({ type: "input", content: input }, C);
+			if (!(await this.#queued()).length) return;
+			if (!this.memory.settled()) {
+				this.#broadcast({ status: "settling" });
+				await Promise.race([this.memory.settle(), new Promise((r) => setTimeout(r, SETTLE))]);
+			}
+			const input = (await this.#queued()).join("\n\n");
+			if (this.busy()) await this.root.submit({ type: "input", content: input, whenBusy: "steer" }, C);
+			else {
+				this.memory.set("pinned", this.memory.render());
+				await this.root.reset(undefined, C);
+				await this.root.submit({ type: "input", content: input }, C);
+			}
+			await this.ctx.storage.delete("inbox");
+			this.#broadcast({ queued: [] });
 		});
 		await this.#sync();
 	}
@@ -576,7 +596,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	async snapshot() {
 		const asks = (await this.#fx(Effect.flatMap(Secrets, (s) => s.asks()))).map(({ token, name, why }) => ({ token, name, why }));
-		return { history: this.memory.log.slice(-200), busy: this.busy(), pending: this.memory.pending(), asks };
+		return { history: this.memory.log.slice(-200), busy: this.busy(), pending: this.memory.pending(), asks, queued: await this.#queued() };
 	}
 
 	stop() { return this.root.abort(C); }

@@ -13,6 +13,7 @@
 	"ai": { "binding": "AI" },
 	"artifacts": [{ "binding": "ARTIFACTS", "namespace": "raubot" }],
 	"durable_objects": { "bindings": [{ "name": "RAUBOT", "class_name": "Raubot" }, { "name": "BOX", "class_name": "Computer" }] },
+	"observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": true }, "traces": { "enabled": true } },
 	"containers": [
 		{ "name": "raubot-computer", "class_name": "Computer", "scheduling_policy": "durable_object", "images": { "box": { "image": "registry.cloudflare.com/fadf1a80d9469afc81af5899893cd853/raubot-box@sha256:0d6d2719e889fffba49c110047f94611a89865cf5aff6f150877d04c7e578b4e" } } }
 	],

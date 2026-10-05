@@ -6,7 +6,7 @@ import type { Secret } from "./secrets.ts";
 export type SecretAsk = { token: string; name: string; why: string };
 
 /** What the core streams to clients: new log lines, the reply being generated, and status. */
-export type CoreEvent = { asks?: SecretAsk[]; history?: Msg[]; partial?: string; status?: string; log?: number; pending?: boolean; busy?: boolean; error?: string };
+export type CoreEvent = { asks?: SecretAsk[]; history?: Msg[]; partial?: string; queued?: string[]; status?: string; log?: number; pending?: boolean; busy?: boolean; error?: string };
 
 /** raubot's core as clients (the web app) see it. */
 export interface Core {
@@ -16,7 +16,7 @@ export interface Core {
 	upload(name: string, bytes: Uint8Array): Promise<string>;
 	/** Stop the current turn. */
 	stop(): Promise<void>;
-	snapshot(): Promise<{ history: Msg[]; busy: boolean; pending: boolean; asks: SecretAsk[] }>;
+	snapshot(): Promise<{ history: Msg[]; busy: boolean; pending: boolean; asks: SecretAsk[]; queued: string[] }>;
 	subscribe(f: (e: CoreEvent) => void): () => void;
 	tree(q: URLSearchParams): unknown;
 	prompt(): string;

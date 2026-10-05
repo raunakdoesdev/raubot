@@ -13,7 +13,7 @@
 	type Item = { kind: "user" | "talk"; i: number; text: string } | Tool;
 	type Ask = { token: string; name: string; why: string };
 
-	let items = $state<Item[]>([]), asks = $state<Ask[]>([]);
+	let items = $state<Item[]>([]), asks = $state<Ask[]>([]), queued = $state<string[]>([]);
 	let partial = $state(""), busy = $state(false), summarizing = $state(false), note = $state("");
 	let text = $state(""), files = $state<string[]>([]), uploading = $state(0);
 	let main: HTMLElement, box: HTMLTextAreaElement, picker: HTMLInputElement, ws: WebSocket;
@@ -52,6 +52,7 @@
 		ws.onmessage = (e) => {
 			const m = JSON.parse(e.data), stick = near();
 			if (m.asks) asks = m.asks;
+			if (m.queued) queued = m.queued;
 			if (m.history) { for (const x of m.history) add(x); partial = ""; }
 			if (m.partial !== undefined) partial = m.partial;
 			if (m.busy !== undefined) { busy = m.busy; summarizing = !!m.pending; note = ""; }
@@ -112,6 +113,7 @@
 					</Collapsible.Root>
 				{/if}
 			{/each}
+			{#each queued as q, k (k)}<div class="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap opacity-60 [overflow-wrap:anywhere]">{strip(q)}</div>{/each}
 			{#if partial}<div class="md text-foreground/80">{@html md(partial)}</div>{/if}
 			{#each asks as a (a.token)}<SecretForm {...a} />{/each}
 		</div>

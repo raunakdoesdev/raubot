@@ -2,9 +2,11 @@ export const NODE = 512;
 export const VIEW = 128_000;
 /** Cache breakpoints inside the view, in characters. */
 export const MARKS = [50_000, 80_000, 100_000];
-export const JOBS = 8;
+export const JOBS = 32;
 export const TRIES = 5;
 export const RETRY = 10_000;
+/** How long a new message waits for summaries before going in anyway (ms). */
+export const SETTLE = 5_000;
 export const CAP = 30_000;
 
 export const MASTER = `You are raubot, a long-lived assistant in one endless conversation with the user.
