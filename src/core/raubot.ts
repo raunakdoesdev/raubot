@@ -268,10 +268,10 @@ Example: find the Slack messages that need the user's attention.
 		const cronsDoc: Nested = {
 			name: "crons",
 			description: `Your scheduled prompts, kept across restarts: [{ id, schedule, tz, prompt, mode, channel, unless, timeout, enabled, next, last }]. No args lists them.
-		\`add: { id, schedule, prompt, tz?, mode?, channel?, unless?, timeout?, enabled? }\` creates or replaces one. schedule: 5-field cron "min hour dom mon dow" (e.g. "0 8 * * 1-5" = 8:00 on weekdays) in tz (default ${cron.TZ}), or an ISO time for a one-shot. mode "agent" (default): a fresh subagent runs the prompt (it sees your VIEW and has your tools) and its final reply goes to channel ("imessage" default, or "app"); a reply of NO_REPLY or HEARTBEAT_OK sends nothing. mode "turn": the prompt comes to you as a "[cron <id>]" message and your reply goes to channel. unless: a bash test run first; exit 0 skips the run ({date} is today in tz, e.g. "test -f /workspace/briefings/{date}.sent"). timeout: seconds (default 3600).
+		\`add: { id, schedule, prompt, tz?, mode?, channel?, unless?, script?, timeout?, enabled? }\` creates or replaces one. schedule: 5-field cron "min hour dom mon dow" (e.g. "0 8 * * 1-5" = 8:00 on weekdays) in tz (default ${cron.TZ}), or an ISO time for a one-shot. mode "agent" (default): a fresh subagent runs the prompt (it sees your VIEW and has your tools) and its final reply goes to channel ("imessage" default, or "app"); a reply of NO_REPLY or HEARTBEAT_OK sends nothing. mode "turn": the prompt comes to you as a "[cron <id>]" message and your reply goes to channel. unless: a bash test run first; exit 0 skips the run ({date} is today in tz, e.g. "test -f /workspace/briefings/{date}.sent"; {date} works in prompt too). script: box path of a codemode script (agent mode) run first with NOW (local ISO time) set; what it returns is added to the task, for deterministic data collection. timeout: seconds (default 3600).
 		\`remove: [ids]\` deletes some; \`run: id\` runs one now.`,
 			inputSchema: Type.Object({
-				add: Type.Optional(Type.Object({ id: Type.String(), schedule: Type.String(), prompt: Type.String(), tz: Type.Optional(Type.String()), mode: Type.Optional(Type.Union([Type.Literal("agent"), Type.Literal("turn")])), channel: Type.Optional(Type.String()), unless: Type.Optional(Type.String()), timeout: Type.Optional(Type.Integer()), enabled: Type.Optional(Type.Boolean()) })),
+				add: Type.Optional(Type.Object({ id: Type.String(), schedule: Type.String(), prompt: Type.String(), tz: Type.Optional(Type.String()), mode: Type.Optional(Type.Union([Type.Literal("agent"), Type.Literal("turn")])), channel: Type.Optional(Type.String()), unless: Type.Optional(Type.String()), script: Type.Optional(Type.String()), timeout: Type.Optional(Type.Integer()), enabled: Type.Optional(Type.Boolean()) })),
 				remove: Type.Optional(Type.Array(Type.String())),
 				run: Type.Optional(Type.String()),
 			}),
@@ -825,13 +825,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			return this.send(`[cron ${c.id}] ${c.prompt}`, await this.#origin(c.channel));
 		}
 		const when = manual ? "started by hand" : `schedule "${c.schedule}" ${c.tz}`;
-		const task = `This is a run of your "${c.id}" cron (${when}), at ${new Date().toISOString()}. Its prompt:\n\n${c.prompt}\n\nYour final reply goes to the user on ${c.channel} as is. If nothing needs them, reply exactly NO_REPLY.`;
-		const code = `const c = ${JSON.stringify({ id: c.id, unless, task, channel: c.channel })};
-	if (c.unless && /\\[exit 0\\]\\s*$/.test(await tools.bash({ cmd: c.unless, timeout: 60 }))) return "SKIPPED " + c.id;
-	const reply = String(await tools.agent({ task: c.task }));
-	if (new RegExp(${JSON.stringify(cron.SILENT.source)}).test(reply)) return "SILENT " + c.id;
-	await tools.message({ text: reply, channel: c.channel });
-	return "SENT " + c.id + ": " + reply.slice(0, 300);`;
+		const task = `This is a run of your "${c.id}" cron (${when}), at ${cron.stamp(c.tz)}. Its prompt:\n\n${c.prompt.replaceAll("{date}", cron.today(c.tz))}\n\nYour final reply goes to the user on ${c.channel} as is. If nothing needs them, reply exactly NO_REPLY.`;
+		// A pre-run script is pasted into the job, wrapped in a function so its names can't clash with the job's.
+		const script = c.script ? await this.#fx(Effect.flatMap(Box, (b) => b.exec(`cat ${JSON.stringify(c.script)}`, "", 30)).pipe(
+			Effect.filterOrFail((r) => r.exitCode === 0, (r) => new Error(`cron ${c.id}: script ${c.script}: ${r.err}`)), Effect.map((r) => r.out))) : "";
+		const code = cron.job({ id: c.id, unless, task, channel: c.channel }, script && { source: script, now: cron.stamp(c.tz) });
 		await this.#fx(Effect.flatMap(Jobs, (j) => j.start(code, `cron ${c.id}`, c.timeout, APP, true)));
 	}
 

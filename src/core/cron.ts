@@ -9,6 +9,8 @@ export type Cron = {
 	channel: string;
 	/** Bash test run first; exit 0 skips this run. {date} is today (YYYY-MM-DD) in tz. */
 	unless?: string;
+	/** Box path of a codemode script run before the agent (hermes' pre-run script), with NOW set to the local time; what it returns goes into the task. */
+	script?: string;
 	timeout: number; enabled: boolean; next?: number; last?: { at: number; status: string };
 };
 
@@ -42,7 +44,13 @@ export const local = (t: number, tz: string) => {
 	return { y: +p.year, mon: +p.month, d: +p.day, h: +p.hour, m: +p.minute, dow: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(p.weekday) };
 };
 
-export const today = (tz: string, t = Date.now()) => { const p = local(t, tz); return `${p.y}-${String(p.mon).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`; };
+const two = (n: number) => String(n).padStart(2, "0");
+export const today = (tz: string, t = Date.now()) => { const p = local(t, tz); return `${p.y}-${two(p.mon)}-${two(p.d)}`; };
+/** Local ISO time with its UTC offset, e.g. 2026-10-05T08:00:00-07:00. */
+export const stamp = (tz: string, t = Date.now()) => {
+	const p = local(t, tz), m = Math.round((Date.UTC(p.y, p.mon - 1, p.d, p.h, p.m) - Math.floor(t / MIN) * MIN) / MIN), a = Math.abs(m);
+	return `${today(tz, t)}T${two(p.h)}:${two(p.m)}:00${m < 0 ? "-" : "+"}${two(Math.floor(a / 60))}:${two(a % 60)}`;
+};
 
 const MIN = 60_000, HOUR = 3_600_000;
 const oneShot = (s: string) => /^\d{4}-\d\d-\d\dT/.test(s);
@@ -71,6 +79,16 @@ export const grace = (c: Cron, due: number) => {
 	const after = oneShot(c.schedule) ? undefined : next(c.schedule, c.tz, due);
 	return Math.min(2 * HOUR, Math.max(2 * MIN, after ? (after - due) / 2 : 2 * HOUR));
 };
+
+/** A cron run as a background job's script: skip test, optional pre-run script (its return value joins the task), subagent, send unless silent. */
+export const job = (c: { id: string; unless?: string; task: string; channel: string }, pre?: { source: string; now: string } | "") => `const c = ${JSON.stringify(c)};
+if (c.unless && /\\[exit 0\\]\\s*$/.test(await tools.bash({ cmd: c.unless, timeout: 60 }))) return "SKIPPED " + c.id;
+${pre ? `const pre = await (async (NOW) => {\n${pre.source}\n})(${JSON.stringify(pre.now)});
+c.task += "\\n\\nPre-run script output:\\n" + (typeof pre === "string" ? pre : JSON.stringify(pre));
+` : ""}const reply = String(await tools.agent({ task: c.task }));
+if (new RegExp(${JSON.stringify(SILENT.source)}).test(reply)) return "SILENT " + c.id;
+await tools.message({ text: reply, channel: c.channel });
+return "SENT " + c.id + ": " + reply.slice(0, 300);`;
 
 const key = (id: string) => `cron:${id}`;
 export const list = kv.list<Cron>("cron:").pipe(Effect.map((m) => [...m.values()].sort((a, b) => (a.next ?? Infinity) - (b.next ?? Infinity))));
