@@ -98,7 +98,7 @@ export async function edit(exec: Exec, put: Put, args: { path: string; edits?: u
 	const edits = editsOf(args);
 	const f = await load(exec, p);
 	if (f.kind !== "text") throw new Error(args.path + " is not a text file");
-	const raw = new TextDecoder().decode(b64decode(f.b64));
+	const raw = new TextDecoder("utf-8", { ignoreBOM: true, fatal: false }).decode(b64decode(f.b64));
 	const { bom, text } = stripBom(raw);
 	const ending = detectLineEnding(text);
 	const { baseContent, newContent } = applyEditsToNormalizedContent(normalizeToLF(text), edits, args.path);

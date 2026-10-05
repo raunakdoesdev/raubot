@@ -74,7 +74,7 @@ export async function codemode(source: string, nested: Nested[], store: Store, s
 	const frozen = await freezer?.load();
 	const deadline = frozen?.deadline ?? until ?? Date.now() + Math.min(options.timeoutMs ?? 120_000, 600_000);
 	const byName = new Map(nested.map((t) => [t.name, t]));
-	byName.set("__sleep", { name: "__sleep", description: "", inputSchema: {}, execute: (({ ms }: { ms: number }) => new Promise((r) => setTimeout(r, Math.max(0, Math.min(ms, deadline - Date.now()))))) as Nested["execute"] });
+	byName.set("__sleep", { name: "__sleep", description: "", inputSchema: {}, execute: (({ ms }: { ms: number }) => new Promise((r) => setTimeout(() => r(true), Math.max(0, Math.min(ms, deadline - Date.now()))))) as Nested["execute"] });
 	byName.set("__notify", { name: "__notify", description: "", inputSchema: {}, execute: (async () => "ok") as Nested["execute"] });
 	if (app) byName.set("__app", { name: "__app", description: "", inputSchema: {}, execute: (({ path, args }: { path: string[]; args: unknown }) => app(path, args)) as Nested["execute"] });
 	const output: string[] = frozen?.output ?? [];
