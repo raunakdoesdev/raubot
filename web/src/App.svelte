@@ -4,7 +4,6 @@
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import ToolRow from "$lib/ToolRow.svelte";
-	import DevinRow from "$lib/DevinRow.svelte";
 	import { parseTool, traces } from "$lib/traces.svelte";
 	import Header from "$lib/Header.svelte";
 	import SecretForm from "$lib/SecretForm.svelte";
@@ -18,7 +17,7 @@
 	type Line = { i: number; kind: string; text: string; date?: number };
 	/** `body` is the call line; `echo` its result; codemode rows carry their `code` and `hash` (matched to a live trace), job rows their `job` id. */
 	type Tool = { kind: "tool"; i: number; name: string; head: string; body: string; arg?: string; code?: string; hash?: string; echo?: string; date?: number; job?: number };
-	type Item = { kind: "user" | "talk" | "devin"; i: number; text: string } | Tool;
+	type Item = { kind: "user" | "talk"; i: number; text: string } | Tool;
 	type Ask = { token: string; name: string; why: string };
 
 	/** A message shown the moment it's sent, until the server echoes it back queued, steering or in the log (t3code's optimistic send). */
@@ -43,8 +42,7 @@
 	/** Folds a log line in: a tool call and its echo become one collapsible row. */
 	function add(x: Line) {
 		if (x.kind === "devin" || ((x.kind === "job" || x.kind === "user") && isDevin(x.text))) {
-			open = [];
-			items.push({ kind: "devin", i: x.i, text: strip(x.text) });
+			return; // Devin callbacks: stored and delivered to the agent, never shown (Raunak's call).
 		} else if (x.kind === "job") {
 			const t = strip(x.text);
 			const head = t.split("\n")[0], job = Number(/\[job (\d+)/.exec(head)?.[1]);
@@ -199,8 +197,6 @@
 				{#snippet row(x)}
 					{#if x.kind === "user"}
 						<div class="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap [overflow-wrap:anywhere]" title="#{x.i}">{@html plain(x.text)}</div>
-					{:else if x.kind === "devin"}
-						<div title="#{x.i}"><DevinRow text={x.text} /></div>
 					{:else if x.kind === "talk"}
 						<div class="md" title="#{x.i}">{@html md(x.text)}</div>
 					{:else if x.kind === "tool"}
@@ -210,7 +206,6 @@
 			</Virtual>
 			{#each [...steering.map((t) => ({ t, intent: "steer" })), ...queued.map((t) => ({ t, intent: "queued" })), ...local.map((l) => ({ t: l.text, intent: l.intent }))] as q, k (k)}
 				{#if isDevin(q.t)}
-					{#each strip(q.t).split(/\n\n(?=\[devin )/) as d}<DevinRow text={d} pending />{/each}
 				{:else if isSystem(q.t)}
 					<div class="truncate font-mono text-xs text-muted-foreground opacity-70">{strip(q.t).split("\n")[0]} · {q.intent === "steer" ? "joins at the next step" : "queued"}</div>
 				{:else}

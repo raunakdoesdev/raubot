@@ -86,7 +86,9 @@
 		<div class="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
 			<Virtual items={lines} key={(_, k) => k} scroller={main} bind:stuck>
 				{#snippet row(x, k)}
-					{#if x.role === "user"}
+					{#if x.role === "user" && /^(\[via \w+\] )?\[devin [\w-]+ /.test(x.text)}
+						<!-- Devin callbacks: hidden -->
+					{:else if x.role === "user"}
 						<Collapsible.Root open={k > 0 || x.text.length < 600}>
 							<Collapsible.Trigger class="group ml-auto flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
 								<ChevronRight class="size-3.5 transition-transform group-data-[state=open]:rotate-90" />{k === 0 ? "task" : "message"}
