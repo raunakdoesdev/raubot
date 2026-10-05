@@ -24,7 +24,7 @@
 	type Local = { id: number; text: string; files: string[]; full: string; intent: "steer" | "queued"; sent: boolean };
 
 	let items = $state<Item[]>([]), asks = $state<Ask[]>([]), queued = $state<string[]>([]), steering = $state<string[]>([]), local = $state<Local[]>([]);
-	let stuck = $state(true), seq = 0;
+	let stuck = $state(true), seq = 0, seen = -1; // last log line folded in; echoes merge into rows, so items.at(-1) can lag
 	let partial = $state(""), busy = $state(false), summarizing = $state(false), note = $state("");
 	let text = $state(""), files = $state<string[]>([]), uploading = $state(0);
 	let main = $state<HTMLElement>(), box: HTMLTextAreaElement, picker: HTMLInputElement, ws: WebSocket;
@@ -75,9 +75,8 @@
 			if (m.steering) steering = m.steering;
 			if (m.history) {
 				// A reconnect's snapshot: keep what's drawn and add only newer lines, unless there's a gap.
-				const last = items.at(-1)?.i ?? -1;
-				if (m.history[0]?.i > last + 1) { items = []; open = []; }
-				for (const x of m.history) if (x.i > (items.at(-1)?.i ?? -1)) add(x);
+				if (m.history[0]?.i > seen + 1) { items = []; open = []; }
+				for (const x of m.history) if (x.i > seen) { add(x); seen = x.i; }
 				live(""); 
 			}
 			if (m.partial !== undefined) live(m.partial);

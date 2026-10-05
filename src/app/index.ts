@@ -43,8 +43,10 @@ const socket = (core: Core) => {
 	const [client, server] = Object.values(new WebSocketPair());
 	server.accept();
 	const out = (m: object) => { try { server.send(JSON.stringify(m)); } catch { off(); } };
-	void core.snapshot().then(out);
-	const off = core.subscribe(out);
+	// Hold live events until the snapshot is out, so a new line can't arrive first and look like a gap.
+	let early: object[] | undefined = [];
+	const off = core.subscribe((m) => (early ? early.push(m) : out(m)));
+	void core.snapshot().then((s) => { out(s); for (const m of early!) out(m); early = undefined; });
 	server.addEventListener("message", (ev) => {
 		const m = JSON.parse(String(ev.data)) as { send?: string; files?: string[]; stop?: true };
 		if (m.send || m.files?.length) core.send(m.send ?? "", undefined, m.files).catch((e) => out({ error: String(e) }));
