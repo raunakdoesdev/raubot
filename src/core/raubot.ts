@@ -31,6 +31,7 @@ import { bash, Box, BoxLive, runner, Storage, write } from "./fx.ts";
 import { JobHost, Jobs, JobsLive } from "./jobs.ts";
 import { OAuth } from "./oauth.ts";
 import { redact, Secrets, SecretsLive } from "./secrets.ts";
+import { type TraceEvent, Tracer } from "./trace.ts";
 
 type Env = { SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
 
@@ -83,6 +84,7 @@ const withSearch = (provider: string, p: AnthropicPayload) => (provider === "ope
 
 export class Raubot extends DurableObject<Env> implements Core {
 	memory!: Memory;
+	tracer!: Tracer;
 	oauth!: OAuth;
 	harness!: Harness;
 	root!: Conversation;
@@ -130,11 +132,16 @@ export class Raubot extends DurableObject<Env> implements Core {
 	async #init() {
 		this.oauth = new OAuth(this.ctx.storage, this.env.EXECUTOR_URL);
 		this.#channels = channels(this.env);
+		// Live traces: only raubot's own scripts and its jobs stream to the main chat; a subagent's view polls /traces.json.
+		this.tracer = new Tracer(this.ctx.storage, (e) => { if (this.#mine(e.run.conv)) this.#broadcast({ trace: e } as CoreEvent & { trace: TraceEvent }); });
 		const host = Layer.succeed(JobHost, {
 			run: async (job, signal) => {
 				const store = (await this.ctx.storage.get<Record<string, unknown>>("codemode-store")) ?? {};
 				const freezer = this.#freezer(`job:${job.id}`);
-				const r = await codemode(job.code, this.#tools(`job:${job.id}`), store, signal, this.#app, freezer, job.deadline);
+				const t = this.tracer.begin(`job:${job.id}`, job.code, job.id);
+				let r;
+				try { r = await codemode(job.code, this.#tools(`job:${job.id}`), store, signal, this.#app, freezer, job.deadline, t.hooks); }
+				finally { t.end(r?.error !== false); }
 				await freezer.clear();
 				return r;
 			},
@@ -285,7 +292,10 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 					const store = (await this.ctx.storage.get<Record<string, unknown>>("codemode-store")) ?? {};
 					const tools = this.#tools(String(api.taskId), { api, ctx });
 					const freezer = this.#freezer(String(api.taskId));
-					const r = await codemode(code, tools, store, (ctx as { signal?: AbortSignal }).signal, executor.app, freezer);
+					const t = this.tracer.begin(String(api.conversationId), code);
+					let r;
+					try { r = await codemode(code, tools, store, (ctx as { signal?: AbortSignal }).signal, executor.app, freezer, undefined, t.hooks); }
+					finally { t.end(r?.error !== false); }
 					await freezer.clear();
 					if (!r.error) await this.ctx.storage.put("codemode-store", store);
 					return { content: [{ type: "text", text: r.text }], isError: r.error };
@@ -659,6 +669,14 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	stop() { return this.root.abort(C); }
 
 	prompt() { return this.#prompt; }
+
+	/** Runs raubot streams itself: its root conversation's and its jobs'. */
+	#mine(conv: string) { return conv.startsWith("job:") || (!!this.root && conv === String(this.root.id)); }
+
+	/** App: traced script runs, raubot's (no conv) or one subagent's. */
+	traceRuns(conv?: number) { return this.tracer.runs(conv === undefined ? (c) => this.#mine(c) : (c) => c === String(conv), 150); }
+	trace(run: string) { return this.tracer.get(run); }
+	traceBody(run: string, id: number) { return this.tracer.body(run, id); }
 
 	async settings() {
 		const tools = await this.ctx.storage.get<unknown[]>("executor-tools");

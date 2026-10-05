@@ -1,6 +1,7 @@
 import type { Origin } from "./channels/index.ts";
 import type { Msg } from "./memory.ts";
 import type { Secret } from "./secrets.ts";
+import type { TraceCall, TraceRun } from "./trace.ts";
 
 /** A secret raubot is waiting on; the token is the key to its form. */
 export type SecretAsk = { token: string; name: string; why: string };
@@ -47,6 +48,12 @@ export interface Core {
 	/** Executor OAuth: the URL to send the user to, then the callback. */
 	oauthStart(origin: string): Promise<string>;
 	oauthDone(params: URLSearchParams): Promise<void>;
+	/** Traced codemode runs, oldest first: raubot's and its jobs', or one subagent's. Live ones also stream as `{ trace: TraceEvent }` events. */
+	traceRuns(conv?: number): Promise<TraceRun[]>;
+	/** One run with its nested call summaries. */
+	trace(run: string): Promise<{ run: TraceRun; calls: TraceCall[] } | undefined>;
+	/** One nested call's full args and result (truncated). */
+	traceBody(run: string, id: number): Promise<{ args: string; out?: string } | undefined>;
 	/** Every subagent (newest first) for search, without last output. */
 	agentIndex(): Promise<Omit<AgentRow, "last">[]>;
 }

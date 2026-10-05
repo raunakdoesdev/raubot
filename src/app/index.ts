@@ -96,6 +96,15 @@ export const serve = async (core: Core, req: Request): Promise<Response> => {
 			if (!(f instanceof File)) return new Response("no file", { status: 400 });
 			return Response.json({ path: await core.upload(f.name, new Uint8Array(await f.arrayBuffer())) });
 		}
+		case "/traces.json": {
+			const conv = url.searchParams.get("conv");
+			return Response.json(await core.traceRuns(conv ? Number(conv) : undefined));
+		}
+		case "/trace.json": {
+			const run = url.searchParams.get("run") ?? "", call = url.searchParams.get("call");
+			const t = call === null ? await core.trace(run) : await core.traceBody(run, Number(call));
+			return t ? Response.json(t) : new Response("no such trace", { status: 404 });
+		}
 		case "/reset":
 			if (req.method !== "POST") break;
 			await core.reset();

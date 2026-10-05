@@ -38,6 +38,9 @@ const why = (e: string) => { try { const p = JSON.parse(e); return p.stack ?? p.
 
 export type App = (path: string[], args: unknown) => Promise<string>;
 
+/** Observes a script's tool calls as they start and settle (for live traces). Must not throw. */
+export type Hooks = { call(id: number, name: string, args: unknown): void; settle(id: number, ok: boolean, payload: string): void };
+
 // Runs in the VM: any unknown member of `tools` becomes a call path, e.g. tools.vercel.listProjects(args) -> app(["vercel", "listProjects"], args).
 const MOUNT = `
 const raw = tools;
@@ -54,7 +57,7 @@ const opts = (deadline: number, finished: () => boolean, signal?: AbortSignal) =
 });
 
 /** Runs a script. With a freezer, the VM is snapshotted (at most once a second) while it waits on tools, and a rerun after a restart thaws it and re-issues only the calls still owed. */
-export async function codemode(source: string, nested: Nested[], store: Store, signal?: AbortSignal, app?: App, freezer?: Freezer, until?: number) {
+export async function codemode(source: string, nested: Nested[], store: Store, signal?: AbortSignal, app?: App, freezer?: Freezer, until?: number, hooks?: Hooks) {
 	const { code, options } = parseCodemodeSource(source);
 	const frozen = await freezer?.load();
 	const deadline = frozen?.deadline ?? until ?? Date.now() + Math.min(options.timeoutMs ?? 120_000, 600_000);
@@ -74,9 +77,11 @@ export async function codemode(source: string, nested: Nested[], store: Store, s
 			const t = byName.get(name);
 			pending.set(id, [name, args]);
 			dirty = true;
+			try { hooks?.call(id, name, args); } catch {}
 			(t ? t.execute(args as never, id) : Promise.reject(new Error(`Unknown tool "${name}"`)))
 				.then((v) => [true, JSON.stringify(v)] as const, (e) => [false, e instanceof Error ? e.message : String(e)] as const)
 				.then(([ok, p]) => {
+					try { hooks?.settle(id, ok, p); } catch {}
 					if (finished) return;
 					pending.delete(id);
 					dirty = true;
