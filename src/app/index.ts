@@ -59,6 +59,9 @@ const socket = (core: Core) => {
 /** Routes served inside the core's Durable Object. */
 export const serve = async (core: Core, req: Request): Promise<Response> => {
 	const url = new URL(req.url);
+	// Devin callbacks: outside Access like secret links; each run's HMAC secret is the key.
+	const hook = /^\/s\/devin\/([\w-]{6,64})$/.exec(url.pathname);
+	if (hook) return req.method === "POST" ? core.devinHook(hook[1], req) : new Response("POST only", { status: 405 });
 	// Secret form links: outside Cloudflare Access (so iMessage can preview them); the token is the only key.
 	const [, token, json] = TOKEN.exec(url.pathname) ?? [];
 	if (token) {

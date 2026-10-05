@@ -56,4 +56,6 @@ export interface Core {
 	traceBody(run: string, id: number): Promise<{ args: string; out?: string } | undefined>;
 	/** Every subagent (newest first) for search, without last output. */
 	agentIndex(): Promise<Omit<AgentRow, "last">[]>;
+	/** POST /s/devin/<key>: a Devin run's signed callback. */
+	devinHook(key: string, req: Request): Promise<Response>;
 }

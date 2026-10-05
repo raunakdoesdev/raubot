@@ -16,7 +16,7 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
-import { BROWSER, COMPUTER, CRONS, EXECUTOR, HEARTBEAT, MARKS, MASTER, SELF, SETTLE, VIEW, VIEW_DOC } from "./prompts.ts";
+import { BROWSER, COMPUTER, CRONS, DEVIN, EXECUTOR, HEARTBEAT, MARKS, MASTER, SELF, SETTLE, VIEW, VIEW_DOC } from "./prompts.ts";
 import { browse, responses } from "./computer.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Computer } from "./box.ts";
@@ -35,11 +35,13 @@ import { OAuth } from "./oauth.ts";
 import { redact, Secrets, SecretsLive } from "./secrets.ts";
 import { type TraceEvent, Tracer } from "./trace.ts";
 import * as cron from "./cron.ts";
+import * as devin from "./devin.ts";
 
 type Env = { SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
 
 type Services = Storage | Box | Jobs | JobHost | Secrets;
 type CronArgs = { add?: Partial<cron.Cron> & Pick<cron.Cron, "id" | "schedule" | "prompt">; remove?: string[]; run?: string };
+type DevinArgs = { add?: { purpose: string; key?: string; session?: string }; link?: { key: string; session: string }; close?: string[]; all?: boolean; check?: boolean; report?: string; error?: string };
 
 const SOL = { provider: "openai", modelId: "gpt-6.1-sol" };
 
@@ -279,7 +281,21 @@ Example: find the Slack messages that need the user's attention.
 			}),
 			execute: (args: CronArgs) => this.#crons(args),
 		};
-		nested.push(messageDoc, cronsDoc);
+		nested.push(messageDoc, cronsDoc, {
+			name: "devin_runs",
+			description: `Registry of Devin sessions you started, with signed callbacks: use it instead of waiting on devin_session_gather. No args lists open runs.
+\`add: { purpose, key?, session? }\` registers a run before you create the session and returns { key, prompt, curl }: append prompt to the Devin session's prompt (it holds a signed curl Devin runs when it finishes or gets blocked). \`link: { key, session }\` records the Devin session id after creating it. \`close: [key or session id]\` closes runs; \`all: true\` lists closed ones too; \`check: true\` runs the safety-net check now.
+A valid callback comes to you as a "[devin <id> done|blocked|failed]" message with Devin's summary. Every hour a safety net reads each open run's Devin status: finished-without-callback, blocked (waiting for user) and stuck (>24h) runs come the same way; finished ones close.`,
+			inputSchema: Type.Object({
+				add: Type.Optional(Type.Object({ purpose: Type.String(), key: Type.Optional(Type.String()), session: Type.Optional(Type.String()) })),
+				link: Type.Optional(Type.Object({ key: Type.String(), session: Type.String() })),
+				close: Type.Optional(Type.Array(Type.String())),
+				all: Type.Optional(Type.Boolean()), check: Type.Optional(Type.Boolean()),
+				report: Type.Optional(Type.String({ description: "Internal: the safety net's devin_session_interact get output." })),
+				error: Type.Optional(Type.String({ description: "Internal: the safety net's error." })),
+			}),
+			execute: (args: DevinArgs) => this.#devin(args),
+		});
 		const agentDoc: Nested = {
 			name: "agent",
 			description: `Start a subagent on a task and get its result. It runs on your model with all your tools (except agent and agents), sees your current VIEW as context, and does only the task. Its work stays out of your memory. Run several with Promise.all.
@@ -296,7 +312,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			inputSchema: Type.Object({ send: Type.Optional(Type.Object({ id: Type.Integer(), message: Type.String() })), stop: Type.Optional(Type.Array(Type.Integer())) }),
 			execute: () => Promise.reject(new Error("unbound")),
 		};
-		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF}\n\n${CRONS}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
+		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF}\n\n${CRONS}\n\n${DEVIN}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
 		nested.push(agentDoc, agentsDoc, {
 			name: "jobs",
 			description: "Your background jobs, newest first: { id, label, status, started, ended, deadline }. `cancel: [ids]` stops running ones (no result comes back); `prune: true` forgets finished ones.",
@@ -422,7 +438,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				for (const m of e.model ?? []) {
 					const date = m.timestamp ?? Date.now();
 					if (m.role === "assistant" && m.usage) this.#usage({ date, ...m.usage });
-					if (m.role === "user") { const t = text(m.content); this.#log(/^(\[via \w+\] )?\[(job \d+|secret \w+|cron [\w-]+)[\] ]/.test(t) ? "job" : "user", t, date); }
+					if (m.role === "user") { const t = text(m.content); this.#log(/^(\[via \w+\] )?\[(job \d+|secret \w+|cron [\w-]+|devin [\w-]+)[\] ]/.test(t) ? "job" : "user", t, date); }
 					else if (m.role === "toolResult") this.#log("echo", `${m.toolName}: ${text(m.content)}`, date);
 					else for (const b of m.content) {
 						if (typeof b === "string") continue;
@@ -776,7 +792,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	/** One alarm serves memory, jobs and crons: set it to the earliest of `at` and the next cron, never later than one already set. */
 	async #arm(at = Infinity) {
-		const when = Math.min(at, await this.#fx(cron.wake));
+		const when = Math.min(at, await this.#fx(cron.wake), (await this.ctx.storage.get<number>("devin-next")) ?? Infinity);
 		const set = await this.ctx.storage.getAlarm();
 		if (when < Infinity && (set === null || when < set)) await this.ctx.storage.setAlarm(Math.max(when, Date.now()));
 	}
@@ -784,8 +800,67 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	async alarm() {
 		this.memory.pump();
 		for (const c of await this.#fx(cron.due(Date.now()))) await this.#fire(c).catch((e) => this.#fx(cron.record(c.id, `failed to start: ${String(e).slice(0, 200)}`)));
+		await this.#devinTick().catch((e) => console.error("devin check", e));
 		const busy = (await this.#fx(Effect.flatMap(Jobs, (j) => j.resume()))) || this.memory.pending();
 		await this.#arm(busy ? Date.now() + 30_000 : Infinity);
+	}
+
+	/** Hourly while any Devin run is open: a quiet job reads their Devin status and reports through tools.devin_runs. */
+	async #devinTick(force = false) {
+		const next = (await this.ctx.storage.get<number>("devin-next")) ?? 0;
+		if (!force && next > Date.now()) return;
+		const open = await this.#fx(devin.open);
+		if (!open.length) return void (await this.ctx.storage.delete("devin-next"));
+		await this.ctx.storage.put("devin-next", Date.now() + devin.HOUR);
+		const code = `try {\n${devin.CHECK}\n} catch (e) { return await tools.devin_runs({ error: String(e && e.message || e) }); }`;
+		await this.#fx(Effect.flatMap(Jobs, (j) => j.start(code, "devin check", 600, APP, true)));
+	}
+
+	/** Delivers Devin messages, one per channel they came from. */
+	async #devinSay(items: { run: devin.Run; text?: string }[]) {
+		const by = new Map<string, { from: Origin; lines: string[] }>();
+		for (const { run, text } of items) {
+			if (!text) continue;
+			const k = JSON.stringify(run.from), g = by.get(k) ?? { from: run.from, lines: [] };
+			g.lines.push(text);
+			by.set(k, g);
+		}
+		for (const g of by.values()) await this.send(g.lines.join("\n\n"), g.from);
+	}
+
+	/** \`tools.devin_runs\`. */
+	async #devin({ add, link, close = [], all, check, report, error }: DevinArgs) {
+		if (add) {
+			const from = (await this.ctx.storage.get<Origin>("reply")) ?? APP;
+			const r = await this.#fx(devin.add(add.purpose, { channel: from.channel, to: from.to }, add.key, add.session));
+			if (!(await this.ctx.storage.get("devin-next"))) await this.ctx.storage.put("devin-next", Date.now() + devin.HOUR);
+			await this.#arm(Date.now() + devin.HOUR);
+			return JSON.stringify({ key: r.key, ...devin.curl(this.env.PUBLIC_URL, r) });
+		}
+		if (link) return JSON.stringify(devin.show(await this.#fx(devin.link(link.key, link.session))));
+		if (close.length) await this.#fx(devin.close(close));
+		if (report !== undefined) {
+			const items = devin.review(await this.#fx(devin.open), report);
+			for (const i of items) await this.#fx(devin.update(i.run));
+			await this.#devinSay(items);
+			await this.ctx.storage.put("devin-check", { at: Date.now(), checked: items.length, said: items.filter((i) => i.text).length });
+			return `checked ${items.length}, sent ${items.filter((i) => i.text).length}`;
+		}
+		if (error !== undefined) { await this.ctx.storage.put("devin-check", { at: Date.now(), error }); return "noted"; }
+		if (check) await this.#devinTick(true);
+		return JSON.stringify((await this.#fx(all ? devin.all : devin.open)).map(devin.show));
+	}
+
+	/** POST /s/devin/<key>: a Devin session's signed callback. Outside Access; the per-run secret is the key. */
+	async devinHook(key: string, req: Request) {
+		const url = new URL(req.url);
+		const body = await req.text();
+		if (body.length > 8000) return new Response("too big", { status: 413 });
+		const r = await this.#fx(devin.callback(key, url.searchParams.get("status") ?? "done", req.headers.get("x-raubot-ts") ?? "", req.headers.get("x-raubot-sig") ?? "", body).pipe(
+			Effect.map((ok) => ({ ok })), Effect.catchTag("DevinError", (e) => Effect.succeed({ err: e }))));
+		if ("err" in r) return new Response(r.err.message, { status: r.err.status });
+		await this.send(r.ok.text, r.ok.run.from);
+		return new Response("ok");
 	}
 
 	/** The heartbeat cron, created once (removing it sticks). It reads HEARTBEAT.md and stays silent unless something needs the user. */

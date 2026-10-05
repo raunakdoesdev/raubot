@@ -6,7 +6,7 @@
     "deploy": "wrangler deploy",
     "deploy:staging": "wrangler deploy --env staging",
     "check": "tsc -p .",
-    "test": "tsx test/cron.test.ts"
+    "test": "tsx test/cron.test.ts && tsx test/devin.test.ts"
   },
   "keywords": [],
   "author": "",
