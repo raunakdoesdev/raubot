@@ -78,6 +78,18 @@ export const serve = async (core: Core, req: Request): Promise<Response> => {
 		case "/secrets.json":
 			if (req.method === "DELETE") await core.removeSecret(url.searchParams.get("name") ?? "");
 			return Response.json(await core.secrets());
+		case "/agents.json": return Response.json(await core.agentList());
+		case "/agent.json": {
+			const id = Number(url.searchParams.get("id"));
+			if (req.method === "POST") {
+				const { message } = (await req.json()) as { message?: string };
+				if (!message?.trim()) return new Response("empty message", { status: 400 });
+				try { return Response.json({ ok: await core.agentSend(id, message.trim()) }); }
+				catch (e) { return new Response(e instanceof Error ? e.message : String(e), { status: 400 }); }
+			}
+			const t = await core.agentTranscript(id);
+			return t ? Response.json(t) : new Response("no such subagent", { status: 404 });
+		}
 		case "/upload": {
 			if (req.method !== "POST") break;
 			const f = (await req.formData()).get("file");

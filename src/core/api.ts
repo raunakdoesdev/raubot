@@ -8,6 +8,13 @@ export type SecretAsk = { token: string; name: string; why: string };
 /** What the core streams to clients: new log lines, the reply being generated, and status. */
 export type CoreEvent = { asks?: SecretAsk[]; history?: Msg[]; partial?: string; queued?: string[]; status?: string; log?: number; pending?: boolean; busy?: boolean; error?: string };
 
+/** A subagent as the app lists it (like `tools.agents`). */
+export type AgentRow = { id: number; task: string; computer: boolean; status: "running" | "idle"; started: string; last: string };
+/** A background job, read-only. */
+export type JobRow = { id: number; label: string; status: string; started: string; ended?: string; deadline: string };
+/** One transcript line of a subagent. */
+export type AgentLine = { role: "user" | "assistant" | "tool" | "result"; text: string; name?: string };
+
 /** raubot's core as clients (the web app) see it. */
 export interface Core {
 	/** `files` are box paths from `upload`. */
@@ -31,6 +38,12 @@ export interface Core {
 	removeSecret(name: string): Promise<void>;
 	/** Wipe the conversation, jobs and box snapshot (keeps app connections). */
 	reset(): Promise<void>;
+	/** Subagents (newest first) and background jobs. */
+	agentList(): Promise<{ agents: AgentRow[]; jobs: JobRow[] }>;
+	/** A subagent's transcript, oldest first. */
+	agentTranscript(id: number): Promise<{ agent: AgentRow; lines: AgentLine[] } | undefined>;
+	/** Message a subagent like `tools.agents` send: steers a running one, or starts a follow-up of an idle one (don't wait for its reply). */
+	agentSend(id: number, message: string): Promise<string>;
 	/** Executor OAuth: the URL to send the user to, then the callback. */
 	oauthStart(origin: string): Promise<string>;
 	oauthDone(params: URLSearchParams): Promise<void>;

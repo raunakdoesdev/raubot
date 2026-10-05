@@ -23,8 +23,8 @@ import type { Computer } from "./box.ts";
 import { type App, codemode, describe, type Freezer, type Nested } from "./codemode.ts";
 import { Mcp } from "./mcp.ts";
 import { serve } from "../app/index.ts";
-import type { Core, CoreEvent } from "./api.ts";
-import { agent, agents, type AgentHost } from "./agents.ts";
+import type { AgentLine, AgentRow, Core, CoreEvent } from "./api.ts";
+import { agent, agents, type AgentHost, type Info as AgentInfo } from "./agents.ts";
 import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, acknowledge, idle, send as deliver, tag, uploadName, uploads } from "./channels/index.ts";
 import * as frozen from "./freezer.ts";
 import { bash, Box, BoxLive, runner, Storage, write } from "./fx.ts";
@@ -492,6 +492,55 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			if (owner && owner.api.conversationId !== this.root.id) return Promise.reject(new Error("Only raubot can talk to subagents."));
 			return this.#fx(agents(host, args));
 		};
+	}
+
+	/** App: subagents and jobs for the sidebar. */
+	async agentList() {
+		const list = (await this.#fx(agents(this.#host(), {}))) as AgentRow[];
+		const iso = (t?: number) => (t ? new Date(t).toISOString() : undefined);
+		const jobs = (await this.#fx(Effect.flatMap(Jobs, (j) => j.list()))).reverse().slice(0, 30)
+			.map((j) => ({ id: j.id, label: j.label, status: j.status, started: iso(j.started)!, ended: iso(j.ended), deadline: iso(j.deadline)! }));
+		return { agents: list, jobs };
+	}
+
+	async #agentRow(info: AgentInfo): Promise<AgentRow> {
+		const host = this.#host();
+		const [running, last] = await Promise.all([host.running(info.id), host.last(info.id)]);
+		return { id: info.id, task: info.task, computer: info.computer ?? false, status: running ? "running" : "idle", started: new Date(info.started).toISOString(), last: last.slice(-600) };
+	}
+
+	/** App: a subagent's transcript, its newest 200 entries oldest first. */
+	async agentTranscript(id: number) {
+		const info = await this.ctx.storage.get<AgentInfo>(`agentinfo:${id}`);
+		if (!info) return undefined;
+		const conv = await this.harness.conversation(id as never, C);
+		if (!conv) return undefined;
+		const page = await conv.entries({}, 200, undefined, C);
+		const cut = (s: string, n = 8000) => (s.length > n ? `${s.slice(0, n)}
+… (${s.length - n} more chars)` : s);
+		const lines: AgentLine[] = [];
+		for (const e of [...page.items].reverse()) for (const m of (e.model ?? []) as Message[]) {
+			if (m.role === "user") { const t = text(m.content); if (t) lines.push({ role: "user", text: cut(t, 20000) }); }
+			else if (m.role === "assistant") {
+				for (const b of m.content) {
+					if (b.type === "text" && b.text) lines.push({ role: "assistant", text: b.text });
+					else if (b.type === "toolCall") {
+						const a = b.arguments as Record<string, unknown>;
+						lines.push({ role: "tool", name: b.name, text: cut(typeof a.code === "string" ? a.code : JSON.stringify(a, null, 1)) });
+					}
+				}
+			} else if (m.role === "toolResult") lines.push({ role: "result", name: m.toolName, text: cut(text(m.content)) });
+		}
+		return { agent: await this.#agentRow(info), lines };
+	}
+
+	/** App: message a subagent; a follow-up to an idle one runs on in the background and shows up in its transcript. */
+	async agentSend(id: number, message: string) {
+		if (!(await this.ctx.storage.get(`agentinfo:${id}`))) throw new Error(`No subagent ${id}.`);
+		const host = this.#host();
+		if (await host.running(id)) { await host.steer(id, message); return "steered"; }
+		this.ctx.waitUntil(host.ask(id, message, `app:${id}:${Date.now()}`).catch((e) => console.error("agent send", e)));
+		return "asked";
 	}
 
 	#computer!: Extension;

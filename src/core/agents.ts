@@ -17,7 +17,7 @@ export type AgentHost = {
 	stop(id: number): Promise<void>;
 };
 
-type Info = { id: number; task: string; computer?: boolean; started: number };
+export type Info = { id: number; task: string; computer?: boolean; started: number };
 
 const attempt = <A>(f: () => Promise<A>) => Effect.tryPromise({ try: f, catch: (e) => new AgentError({ message: String(e) }) });
 
