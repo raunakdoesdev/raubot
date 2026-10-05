@@ -72,3 +72,12 @@ export const agents = (host: AgentHost, { send, stop = [] }: { send?: { id: numb
 		return { id: a.id, task: a.task.slice(0, 200), computer: a.computer ?? false, status: running ? "running" : "idle", started: new Date(a.started).toISOString(), last: last.length > SNIPPET ? `…${last.slice(-SNIPPET)}` : last };
 	}), { concurrency: 5 });
 });
+
+/** Every subagent, newest first, for search: id, task, computer, started and status. */
+export const catalog = (host: AgentHost) => Effect.gen(function* () {
+	const known = [...(yield* kv.list<Info>("agentinfo:")).values()].sort((a, b) => b.started - a.started);
+	return yield* Effect.forEach(known, (a) => attempt(() => host.running(a.id)).pipe(
+		Effect.orElseSucceed(() => false),
+		Effect.map((running) => ({ id: a.id, task: a.task.slice(0, 400), computer: a.computer ?? false, status: running ? "running" as const : "idle" as const, started: new Date(a.started).toISOString() })),
+	), { concurrency: 10 });
+});

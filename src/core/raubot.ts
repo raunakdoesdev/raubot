@@ -24,7 +24,7 @@ import { type App, codemode, describe, type Freezer, type Nested } from "./codem
 import { Mcp } from "./mcp.ts";
 import { serve } from "../app/index.ts";
 import type { AgentLine, AgentRow, Core, CoreEvent } from "./api.ts";
-import { agent, agents, type AgentHost, type Info as AgentInfo } from "./agents.ts";
+import { agent, agents, catalog, type AgentHost, type Info as AgentInfo } from "./agents.ts";
 import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, acknowledge, idle, send as deliver, tag, uploadName, uploads } from "./channels/index.ts";
 import * as frozen from "./freezer.ts";
 import { bash, Box, BoxLive, runner, Storage, write } from "./fx.ts";
@@ -632,6 +632,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	}
 
 	secrets() { return this.#fx(Effect.flatMap(Secrets, (s) => s.list())); }
+
+	agentIndex() { return this.#fx(catalog(this.#host())); }
 
 	removeSecret(name: string) { return this.#fx(Effect.flatMap(Secrets, (s) => s.remove([name]))); }
 

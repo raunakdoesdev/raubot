@@ -47,4 +47,6 @@ export interface Core {
 	/** Executor OAuth: the URL to send the user to, then the callback. */
 	oauthStart(origin: string): Promise<string>;
 	oauthDone(params: URLSearchParams): Promise<void>;
+	/** Every subagent (newest first) for search, without last output. */
+	agentIndex(): Promise<Omit<AgentRow, "last">[]>;
 }

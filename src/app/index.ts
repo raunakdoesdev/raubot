@@ -100,6 +100,7 @@ export const serve = async (core: Core, req: Request): Promise<Response> => {
 			if (req.method !== "POST") break;
 			await core.reset();
 			return new Response("cleared");
+		case "/agents/all.json": return Response.json(await core.agentIndex());
 		case "/oauth/start":
 			return Response.redirect(await core.oauthStart(/^(localhost|127\.0\.0\.1)$/.test(url.hostname) ? url.origin : `https://${url.host}`), 302);
 		case "/oauth/callback":
