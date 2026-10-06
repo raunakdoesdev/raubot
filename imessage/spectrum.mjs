@@ -44,7 +44,7 @@ else if (OP === "download") {
   for (const a of parts((await message()).content).filter((p) => p.type === "attachment" || p.type === "voice")) {
     const f = `${DIR}/${Date.now().toString(36)}-${(a.name ?? "voice.m4a").replace(/[^\w.-]+/g, "_").slice(-80)}`;
     await writeFile(`/workspace/${f}`, await a.read());
-    files.push(a.type === "voice" ? `${f} (voice memo; transcript: ${await transcribe(`/workspace/${f}`).catch((e) => `failed, ${e.message}`)})` : f);
+    files.push(a.type === "voice" ? `${f} (voice memo, transcribed by speech-to-text, so words and names may be misheard: ${await transcribe(`/workspace/${f}`).catch((e) => `failed, ${e.message}`)})` : f);
   }
   console.log(`FILES ${JSON.stringify(files)}`);
 }
