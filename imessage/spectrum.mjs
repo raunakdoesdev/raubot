@@ -13,7 +13,7 @@ async function transcribe(path) {
   const mp3 = `/tmp/${Date.now().toString(36)}.mp3`;
   await promisify(execFile)(ffmpeg, ["-y", "-loglevel", "error", "-i", path, mp3]);
   const form = new FormData();
-  form.append("model", "gpt-4o-transcribe");
+  form.append("model", "gpt-transcribe");
   form.append("file", new Blob([await readFile(mp3)], { type: "audio/mpeg" }), "voice.mp3");
   const r = await fetch("https://api.openai.com/v1/audio/transcriptions", { method: "POST", headers: { authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: form });
   if (!r.ok) throw new Error(`transcription ${r.status}: ${(await r.text()).slice(0, 200)}`);
