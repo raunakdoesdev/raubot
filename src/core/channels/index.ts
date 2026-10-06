@@ -5,8 +5,8 @@ import { imessage } from "./imessage.ts";
 /** Where a message came from, and so where its turn's reply goes. */
 export type Origin = { channel: string; to: string };
 export const APP: Origin = { channel: "app", to: "" };
-/** `id` is the channel's own message id, for receipts and reactions. `files` saves the message's attachments into `dir` in the box and gives their paths. */
-export type Inbound = { from: Origin; id: string; text: string; files?: (dir: string) => Effect.Effect<string[], ChannelError, Box> };
+/** `quiet`: a tapback or the like, so no read receipt, typing or reaction. `id` is the channel's own message id, for receipts and reactions. `files` saves the message's attachments into `dir` in the box and gives their paths. */
+export type Inbound = { from: Origin; id: string; text: string; quiet?: boolean; files?: (dir: string) => Effect.Effect<string[], ChannelError, Box> };
 
 /** Where uploads land in the box, relative to /workspace: one folder per day. */
 export const uploads = () => `uploads/${new Date().toISOString().slice(0, 10)}`;
@@ -29,11 +29,11 @@ export interface Channel {
 	react?(m: Inbound, emoji: string): Effect.Effect<void, ChannelError, Box>;
 }
 
-export type ChannelEnv = { SPECTRUM_WEBHOOK_SECRET: string };
+export type ChannelEnv = { SPECTRUM_WEBHOOK_SECRET: string; OPENAI_API_KEY: string };
 export type Channels = Readonly<Record<string, Channel>>;
 
 export const channels = (env: ChannelEnv): Channels =>
-	Object.fromEntries([imessage(env.SPECTRUM_WEBHOOK_SECRET)].map((c) => [c.name, c]));
+	Object.fromEntries([imessage(env.SPECTRUM_WEBHOOK_SECRET, env.OPENAI_API_KEY)].map((c) => [c.name, c]));
 
 /** What the model sees: the app's messages as typed, others tagged with their channel. */
 export const tag = (from: Origin, text: string) => (from.channel === APP.channel ? text : `[via ${from.channel}] ${text}`);
@@ -67,7 +67,7 @@ const pickReaction = (ai: Ai, text: string) => Effect.tryPromise(() => ai.run("@
 );
 
 /** Right as a message lands: mark it read, show typing, and tap back an emoji if one fits. Best effort. */
-export const acknowledge = (c: Channel, m: Inbound, ai: Ai) => Effect.all([
+export const acknowledge = (c: Channel, m: Inbound, ai: Ai) => m.quiet ? Effect.void : Effect.all([
 	c.read?.(m) ?? Effect.void,
 	c.typing?.(m.from.to, true) ?? Effect.void,
 	c.react && m.text ? pickReaction(ai, m.text).pipe(Effect.flatMap((e) => (e ? c.react!(m, e) : Effect.void))) : Effect.void,
