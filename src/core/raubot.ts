@@ -24,7 +24,7 @@ import { type App, codemode, describe, type Freezer, type Nested } from "./codem
 import { Mcp } from "./mcp.ts";
 import { serve } from "../app/index.ts";
 import type { AgentLine, AgentRow, Core, CoreEvent } from "./api.ts";
-import { agent, agents, APPROVED, catalog, type AgentHost, type Info as AgentInfo } from "./agents.ts";
+import { agent, agents, APPROVED, catalog, MAX_DEPTH, refuse, type AgentHost, type Info as AgentInfo } from "./agents.ts";
 import { location } from "./channels/imessage.ts";
 import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, acknowledge, idle, send as deliver, tag, uploadName, uploads } from "./channels/index.ts";
 import * as frozen from "./freezer.ts";
@@ -149,12 +149,12 @@ export class Raubot extends DurableObject<Env> implements Core {
 				const freezer = this.#freezer(`job:${job.id}`);
 				const t = this.tracer.begin(`job:${job.id}`, job.code, job.id);
 				let r;
-				try { r = await codemode(job.code, this.#tools(`job:${job.id}`), store, signal, this.#app, freezer, job.deadline, t.hooks); }
+				try { r = await codemode(job.code, this.#tools(`job:${job.id}`, undefined, job.by), store, signal, this.#app, freezer, job.deadline, t.hooks); }
 				finally { t.end(r?.error !== false); }
 				await freezer.clear();
 				return r;
 			},
-			bump: (from, text) => this.send(text, from),
+			bump: (from, text, by) => this.#bump(from, text, by),
 			note: (job, text) => this.#fx(cron.record(job.label.replace(/^cron /, ""), /^"?(SENT|SKIPPED|SILENT)/.exec(text)?.[1]?.toLowerCase() ?? "done")),
 			stopChildren: async (id) => {
 				for (const c of (await this.ctx.storage.list<number>({ prefix: `agent:job:${id}:` })).values()) await (await this.harness.conversation(c as never, C))?.abort(C);
@@ -310,10 +310,11 @@ A valid callback comes to you as a "[devin <id> done|blocked|failed]" message wi
 		});
 		const agentDoc: Nested = {
 			name: "agent",
-			description: `Start a subagent on a task and get its result. It runs on your model with all your tools (except agent and agents), sees your current VIEW as context, and does only the task. Its work stays out of your memory. Run several with Promise.all.
+			description: `Start a subagent on a task and get its result. It runs on your model with all your tools, sees your current VIEW as context, and does only the task. Its work stays out of your memory. Run several with Promise.all.
 Each subagent has its own box, copied from your box's last snapshot (same files and installs), so they never collide. Its /workspace commits merge into workspace main when it replies, and show up in your /workspace on your next bash call; a conflict it can't fix stays on branch agent-<id>.
 With no schema it resolves to its reply as a string. With schema (a JSON Schema) it resolves to a parsed object matching it, for use in code.
 With computer: true it runs on GPT-6.1 Sol with a browser too: a real Chromium in its own box whose logins are shared with every box (a login or logout in one shows up in the others on their next browser call) and signs in with the user's Bitwarden passwords, TOTP codes and passkeys. Use it for anything done on a website.  A browser task takes minutes, longer than a foreground script may run, so start it in a background codemode job (timeout 1800) and steer or check it with tools.agents.
+Nesting: a computer agent can't start agents; other subagents can start computer agents, and non-computer subagents nest at most ${MAX_DEPTH} deep (you are depth 0).
 Example: const r = await tools.agent({ task: "Find every open PR in repo X that touches billing", schema: { type: "array", items: { type: "object", properties: { url: { type: "string" }, why: { type: "string" } }, required: ["url", "why"] } } });`,
 			inputSchema: Type.Object({ task: Type.String(), schema: Type.Optional(Type.Unknown()), computer: Type.Optional(Type.Boolean()) }),
 			execute: () => Promise.reject(new Error("unbound")),
@@ -338,10 +339,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			})),
 		});
 		const boxed = new Map<string, Map<string, Nested>>();
-		this.#tools = (scope, owner) => {
+		this.#tools = (scope, owner, by) => {
+			const caller = owner?.api.conversationId ?? by ?? this.root.id;
 			const box = owner ? this.#boxOf(owner.api.conversationId) : "main";
 			const own = box === "main" ? undefined : boxed.get(box) ?? boxed.set(box, new Map(boxTools(box).map((t) => [t.name, t]))).get(box)!;
-			return nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(scope, owner) } : t === agentsDoc ? { ...t, execute: this.#agents(owner) } 
+			return nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(scope, caller, owner) } : t === agentsDoc ? { ...t, execute: this.#agents() } 
 				: t === messageDoc ? { ...t, execute: this.#message(owner?.api.conversationId === this.root.id) } : own?.get(t.name) ?? t));
 		};
 		this.#app = executor.app;
@@ -380,10 +382,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				}),
 				execute: async ({ code, background }, api, ctx) => {
 					if (background) {
-						if (api.conversationId !== this.root.id) throw new Error("Only raubot can start background jobs.");
+						// A subagent's job (e.g. a cron run waiting on a computer agent) reports back to it while it runs, else to raubot.
+						const by = api.conversationId === this.root.id ? undefined : api.conversationId as unknown as number;
 						const from = (await this.ctx.storage.get<Origin>("reply")) ?? APP;
 						const { label, timeout } = background;
-						const job = await this.#fx(Effect.flatMap(Jobs, (j) => j.start(code, label, timeout, { channel: from.channel, to: from.to })));
+						const job = await this.#fx(Effect.flatMap(Jobs, (j) => j.start(code, label, timeout, { channel: from.channel, to: from.to }, false, by)));
 						return { content: [{ type: "text", text: `Started job ${job.id} (${label}). Its result will come back to you as a job message.` }] };
 					}
 					const store = (await this.ctx.storage.get<Record<string, unknown>>("codemode-store")) ?? {};
@@ -602,21 +605,32 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	#boxOf(conv: unknown) { return conv === this.root.id ? "main" : `agent-${conv}`; }
 
 	/** `tools.agent`: a child conversation keyed by the script's call id, so a thawed script finds it again. */
-	#agent(scope: string, owner?: { api: ToolExecutionApi; ctx: Context }) {
+	#agent(scope: string, caller: unknown, owner?: { api: ToolExecutionApi; ctx: Context }) {
 		const host = this.#host(owner);
-		return (args: { task: string; schema?: object; computer?: boolean }, call: number) => {
-			if (owner && owner.api.conversationId !== this.root.id) return Promise.reject(new Error("A subagent can't start subagents."));
-			return this.#fx(agent(host, `agent:${scope}:${call}`, args));
+		return async (args: { task: string; schema?: object; computer?: boolean }, call: number) => {
+			const id = caller as number;
+			const info = caller === this.root.id ? undefined : (await this.ctx.storage.get<AgentInfo>(`agentinfo:${id}`)) ?? { id, task: "", started: 0 };
+			const no = refuse(info, args.computer ?? false);
+			if (no) throw new Error(no);
+			return this.#fx(agent(host, `agent:${scope}:${call}`, args, { depth: info ? (info.depth ?? 1) + 1 : 1, ...(info && { parent: id }) }));
 		};
 	}
 
+	/** A job's result: to the subagent that started it while it still runs, else to raubot (noting whose it was). */
+	async #bump(from: Origin, text: string, by?: number) {
+		if (by !== undefined) {
+			const host = this.#host();
+			try { if (await host.running(by)) return void (await host.steer(by, text)); }
+			catch (e) { console.error("bump", by, e); }
+			text += `\n(This job was started by subagent ${by}, which has finished: act on it for the user if needed.)`;
+		}
+		return this.send(text, from);
+	}
+
 	/** `tools.agents`: raubot's view of every subagent, from any turn or job. */
-	#agents(owner?: { api: ToolExecutionApi; ctx: Context }) {
+	#agents() {
 		const host = this.#host();
-		return (args: { send?: { id: number; message: string }; stop?: number[] }) => {
-			if (owner && owner.api.conversationId !== this.root.id) return Promise.reject(new Error("Only raubot can talk to subagents."));
-			return this.#fx(agents(host, args));
-		};
+		return (args: { send?: { id: number; message: string }; stop?: number[] }) => this.#fx(agents(host, args));
 	}
 
 	/** App: subagents and jobs for the sidebar. */
@@ -681,7 +695,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	#computer!: Extension;
 
-	#tools!: (scope: string, owner?: { api: ToolExecutionApi; ctx: Context }) => Nested[];
+	#tools!: (scope: string, owner?: { api: ToolExecutionApi; ctx: Context }, by?: number) => Nested[];
 	#app?: App;
 	busy() { return (this.state.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; }
 

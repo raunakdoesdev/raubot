@@ -18,7 +18,19 @@ export type AgentHost = {
 	stop(id: number): Promise<void>;
 };
 
-export type Info = { id: number; task: string; computer?: boolean; started: number };
+/** depth: raubot is 0, its subagents 1, theirs 2 (missing on old records: 1). parent: the conversation that started it. */
+export type Info = { id: number; task: string; computer?: boolean; started: number; depth?: number; parent?: number };
+
+/** How deep non-computer subagents may nest (raubot is depth 0). Computer agents are leaves: they never start agents, but any non-computer subagent may start one. */
+export const MAX_DEPTH = 2;
+
+/** Why `caller` (undefined: raubot) may not start a subagent, or undefined if it may. */
+export const refuse = (caller: Info | undefined, computer: boolean) => {
+	if (caller?.computer) return "A computer agent can't start subagents.";
+	const depth = caller ? caller.depth ?? 1 : 0;
+	if (!computer && depth + 1 > MAX_DEPTH) return `Subagents nest at most ${MAX_DEPTH} deep: start a computer agent or do it yourself.`;
+	return undefined;
+};
 
 const attempt = <A>(f: () => Promise<A>) => Effect.tryPromise({ try: f, catch: (e) => new AgentError({ message: String(e) }) });
 
@@ -33,11 +45,11 @@ const mismatch = (schema: object, reply: string) => {
 export const APPROVED = "Approved. Go ahead, and don't ask for confirmation again unless it's to spend or move money or to send data or information to other people (messages, emails, shares, approvals or replies as the user).";
 
 /** `tools.agent`: run a task on a subagent keyed by `key` (stable across restarts). A string reply, or with `schema` a validated value. */
-export const agent = (host: AgentHost, key: string, { task, schema, computer = false }: { task: string; schema?: object; computer?: boolean }) => Effect.gen(function* () {
+export const agent = (host: AgentHost, key: string, { task, schema, computer = false }: { task: string; schema?: object; computer?: boolean }, from: { depth: number; parent?: number } = { depth: 1 }) => Effect.gen(function* () {
 	let id = yield* kv.get<number>(key);
 	if (!id) {
 		id = yield* attempt(() => host.create(computer));
-		yield* kv.put({ [key]: id, [`agentinfo:${id}`]: { id, task, computer, started: Date.now() } satisfies Info });
+		yield* kv.put({ [key]: id, [`agentinfo:${id}`]: { id, task, computer, started: Date.now(), ...from } satisfies Info });
 	}
 	const ask = (content: string, n: string) => attempt(() => host.ask(id, content, `${key}:${n}`));
 	const shape = schema ? `\n\nReply with only JSON (no prose, no code fence) matching this JSON Schema:\n${JSON.stringify(schema)}` : "";
