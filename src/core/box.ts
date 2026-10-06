@@ -232,6 +232,14 @@ export class Computer extends DurableObject<Env> {
 		for (const [d, cs] of Object.entries(changed)) await (cs.length ? this.ctx.storage.put(`jar:${d}`, cs) : this.ctx.storage.delete(`jar:${d}`));
 	}
 
+	/** The live view: the browser's current tab, or undefined when the box or its browser isn't running. Never starts the box. */
+	async screen() {
+		const c = this.ctx.container!;
+		if (!c.running) return undefined;
+		const r = await c.getTcpPort(8090).fetch("http://box/screen").catch(() => undefined);
+		return r?.status === 200 ? { jpeg: new Uint8Array(await r.arrayBuffer()), url: r.headers.get("x-url") ?? "" } : undefined;
+	}
+
 	async status() {
 		const [snapshot, last, saved, alarm] = await Promise.all(["snapshot", "last", "saved"].map((k) => this.ctx.storage.get(k)).concat(this.ctx.storage.getAlarm()));
 		return { running: this.ctx.container!.running, images: this.ctx.container!.images, snapshot, last, saved, alarm };

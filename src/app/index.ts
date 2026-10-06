@@ -31,6 +31,11 @@ export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Pro
 			.transform(await asset("/secret"));
 	}
 	if (pathname === "/files.json" || pathname === "/file" || pathname.startsWith("/file/")) return files(req, env, url);
+	const screen = /^\/agent\/(\d+)\/screen\.jpg$/.exec(pathname);
+	if (screen) {
+		const s = await env.BOX.getByName(`agent-${screen[1]}`).screen();
+		return s ? new Response(s.jpeg, { headers: { "content-type": "image/jpeg", "cache-control": "no-store", "x-url": s.url } }) : new Response(null, { status: 204 });
+	}
 	if (pathname === "/box") {
 		const box = env.BOX;
 		const b = box.getByName("main");

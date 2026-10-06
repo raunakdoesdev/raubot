@@ -133,3 +133,10 @@ http.createServer(async (req, res) => {
 		res.end(JSON.stringify({ ok: await ops[req.url.slice(1)](b) }));
 	} catch (e) { res.end(JSON.stringify({ error: scrub(String(e?.message ?? e)) })); }
 }).listen(SOCK);
+
+// The app's live view polls this through the box: the current tab as a JPEG, 204 before the browser starts.
+http.createServer(async (req, res) => {
+	const jpeg = ctx && page && !page.isClosed() ? await page.screenshot({ type: "jpeg", quality: 60, timeout: 5000 }).catch(() => undefined) : undefined;
+	if (!jpeg) return res.writeHead(204).end();
+	res.writeHead(200, { "content-type": "image/jpeg", "x-url": encodeURI(page.url()) }).end(jpeg);
+}).listen(8090, "0.0.0.0");

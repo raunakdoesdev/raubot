@@ -53,6 +53,23 @@
 	const timer = setInterval(() => { if (!document.hidden && (pending.length || ++ticks % 3 === 0)) poll(); }, 1000);
 	onDestroy(() => clearInterval(timer));
 
+	// Live view of a computer subagent's browser while it runs; the last frame stays up after.
+	let shot = $state(""), shotUrl = $state(""), live = true;
+	onDestroy(() => { live = false; if (shot) URL.revokeObjectURL(shot); });
+	(async () => {
+		while (live) {
+			if (!document.hidden && agent?.computer && agent.status === "running") {
+				const r = await fetch(`/agent/${id}/screen.jpg`).catch(() => undefined);
+				if (r?.status === 200) {
+					if (shot) URL.revokeObjectURL(shot);
+					shot = URL.createObjectURL(await r.blob());
+					shotUrl = decodeURI(r.headers.get("x-url") ?? "");
+				}
+			}
+			await new Promise((r) => setTimeout(r, 700));
+		}
+	})();
+
 	const fit = () => { box.style.height = "auto"; box.style.height = `${box.scrollHeight}px`; };
 	async function send() {
 		const message = text.trim();
@@ -81,6 +98,13 @@
 		{#snippet lead()}<Button variant="ghost" size="icon-sm" class="md:hidden" aria-label="menu" onclick={onmenu}><PanelLeft /></Button>{/snippet}
 		<span class="truncate text-sm text-muted-foreground">{note || (agent ? `${agent.status}${agent.computer ? " · computer" : ""}` : "loading…")}</span>
 	</Header>
+
+	{#if shot && agent?.computer}
+		<div class="mx-auto w-full max-w-3xl shrink-0 px-4 pt-3">
+			<div class="mb-1 truncate text-xs text-muted-foreground">{agent.status === "running" ? "live" : "last frame"} · {shotUrl}</div>
+			<img src={shot} alt="the subagent's browser" class="max-h-[40dvh] w-full rounded-md border bg-muted object-contain" />
+		</div>
+	{/if}
 
 	<main bind:this={main} class="no-scrollbar flex-1 [overflow-anchor:none] overflow-y-auto overscroll-contain">
 		<div class="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
