@@ -2,7 +2,11 @@ import { Effect } from "effect";
 import { bash, kv } from "../fx.ts";
 import { type Channel, ChannelError, images } from "./index.ts";
 
-type Webhook = { message?: { id: string; space: { id: string }; content: { type: string; text?: string } } };
+type Content = { type: string; text?: string; items?: { content?: Content }[] };
+type Webhook = { message?: { id: string; space: { id: string }; content: Content } };
+
+/** One iMessage with text and pictures arrives as a group of parts; its text is in the text parts. */
+const textOf = (c: Content) => c.type === "group" ? (c.items ?? []).map((i) => i.content?.type === "text" ? i.content.text : "").filter(Boolean).join("\n") : c.text ?? "";
 
 /** Spectrum content types raubot takes in: text, or one or more files. */
 const FILES = new Set(["attachment", "group"]);
@@ -37,11 +41,12 @@ export const imessage = (secret: string): Channel => ({
 		const body = yield* Effect.promise(() => req.text());
 		if (!(yield* signed(secret, req.headers, body))) return yield* new ChannelError({ message: "bad signature", status: 401 });
 		const { message: m } = yield* Effect.try({ try: () => JSON.parse(body) as Webhook, catch: () => new ChannelError({ message: "bad body", status: 400 }) });
-		const files = FILES.has(m?.content.type ?? "");
-		if (!m || !(files || (m.content.type === "text" && m.content.text)) || (yield* kv.get(`imsg:${m.id}`))) return [];
+		const files = FILES.has(m?.content.type ?? ""), text = m ? textOf(m.content) : "";
+		console.log("imessage in", JSON.stringify({ id: m?.id, type: m?.content.type, parts: m?.content.items?.map((i) => i.content?.type), text: text.length }));
+		if (!m || !(files || (m.content.type === "text" && text)) || (yield* kv.get(`imsg:${m.id}`))) return [];
 		yield* kv.put({ [`imsg:${m.id}`]: 1 });
 		return [{
-			from: { channel: "imessage", to: m.space.id }, id: m.id, text: m.content.text ?? "",
+			from: { channel: "imessage", to: m.space.id }, id: m.id, text,
 			files: files ? (dir: string) => spectrum(m.space.id, { OP: "download", MSG: m.id, DIR: dir }).pipe(Effect.map((out) => JSON.parse(/^FILES (.*)$/m.exec(out)?.[1] ?? "[]") as string[])) : undefined,
 		}];
 	}),
