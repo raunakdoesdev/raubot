@@ -25,6 +25,7 @@ import { Mcp } from "./mcp.ts";
 import { serve } from "../app/index.ts";
 import type { AgentLine, AgentRow, Core, CoreEvent } from "./api.ts";
 import { agent, agents, APPROVED, catalog, type AgentHost, type Info as AgentInfo } from "./agents.ts";
+import { location } from "./channels/imessage.ts";
 import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, acknowledge, idle, send as deliver, tag, uploadName, uploads } from "./channels/index.ts";
 import * as frozen from "./freezer.ts";
 import { bash, Box, BoxLive, runner, Storage, write } from "./fx.ts";
@@ -249,6 +250,12 @@ stream(model, context, model.api === "anthropic-messages" ? { ...options, sessio
 				description: "When message id was logged.",
 				inputSchema: Type.Object({ id: Type.Integer() }),
 				execute: async ({ id }: { id: number }) => memory.date(id),
+			},
+			{
+				name: "location",
+				description: "Where the user is now, from the Find My location they share with your iMessage number: { latitude?, longitude?, address?, locationType (live | shallow | legacy | unknown), locationTimestamp?, ... }. Coordinates can be missing. Fails if they aren't sharing it.",
+				inputSchema: Type.Object({}),
+				execute: async () => this.#fx(location((await this.#origin("imessage")).to)),
 			},
 			{
 				name: "decide",

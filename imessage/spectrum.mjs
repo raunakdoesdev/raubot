@@ -1,5 +1,5 @@
 // One iMessage action via Spectrum (gRPC, so it runs in the box, not the Worker).
-// OP=send TEXT_B64 (markdown, rendered as iMessage styled text) [FILES: JSON list of box paths, sent as attachments] | OP=read MSG | OP=typing ON=1|0 | OP=react MSG EMOJI | OP=download MSG DIR (prints FILES [paths]; a voice memo is transcribed with OPENAI_API_KEY)
+// OP=send TEXT_B64 (markdown, rendered as iMessage styled text) [FILES: JSON list of box paths, sent as attachments] | OP=read MSG | OP=typing ON=1|0 | OP=react MSG EMOJI | OP=location (prints LOCATION {Find My location of the space's person}) | OP=download MSG DIR (prints FILES [paths]; a voice memo is transcribed with OPENAI_API_KEY)
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -19,7 +19,10 @@ async function transcribe(path) {
   if (!r.ok) throw new Error(`transcription ${r.status}: ${(await r.text()).slice(0, 200)}`);
   return JSON.stringify((await r.json()).text);
 }
-const app = await Spectrum({ projectId, projectSecret, providers: [imessage.config()] });
+const provider = imessage.config();
+// spectrum-ts has no locations API, so this action hands out the provider's own Advanced iMessage client's.
+provider.__definition.actions.locations = async ({ client }) => client[0].client.locations;
+const app = await Spectrum({ projectId, projectSecret, providers: [provider] });
 const space = await imessage(app).space.get(SPACE);
 const message = async () => (await space.getMessage(MSG)) ?? Promise.reject(new Error(`no message ${MSG}`));
 if (OP === "send") {
@@ -32,6 +35,7 @@ if (OP === "send") {
 }
 else if (OP === "read") await (await message()).read();
 else if (OP === "typing") await (ON === "1" ? space.startTyping() : space.stopTyping());
+else if (OP === "location") console.log(`LOCATION ${JSON.stringify(await (await imessage(app).locations()).get(SPACE.split(";").pop()))}`);
 else if (OP === "react") await (await message()).react(EMOJI);
 else if (OP === "download") {
   const parts = (c) => c.type === "group" ? c.items.flatMap((i) => parts(i.content)) : c.type === "reply" ? parts(c.content) : [c];

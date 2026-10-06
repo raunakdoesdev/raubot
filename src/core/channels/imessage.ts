@@ -45,6 +45,9 @@ flock /tmp/imessage.lock sh -c 'git -C raubot fetch -q && git -C raubot checkout
 	Effect.filterOrFail((out) => /\[exit 0\]\s*$/.test(out), (out) => new ChannelError({ message: `${vars.OP} failed: ${out.slice(-500)}`, status: 502 })),
 );
 
+/** The Find My location the person in this space shares with raubot's number. */
+export const location = (space: string) => spectrum(space, { OP: "location" }).pipe(Effect.map((out) => /^LOCATION (.*)$/m.exec(out)?.[1] ?? "unknown"));
+
 /** iMessage through Photon's Spectrum. Its SDK is gRPC, which Workers can't speak, so the box runs its actions. */
 export const imessage = (secret: string, openai: string): Channel => ({
 	name: "imessage",
