@@ -53,12 +53,12 @@
 	const timer = setInterval(() => { if (!document.hidden && (pending.length || ++ticks % 3 === 0)) poll(); }, 1000);
 	onDestroy(() => clearInterval(timer));
 
-	// Live view of a computer subagent's browser while it runs; the last frame stays up after.
+	// Live view of a computer subagent's browser while it runs; the last frame stays up after (and shows on open while its box is up).
 	let shot = $state(""), shotUrl = $state(""), live = true;
 	onDestroy(() => { live = false; if (shot) URL.revokeObjectURL(shot); });
 	(async () => {
 		while (live) {
-			if (!document.hidden && agent?.computer && agent.status === "running") {
+			if (!document.hidden && agent?.computer && (agent.status === "running" || !shot)) {
 				const r = await fetch(`/agent/${id}/screen.jpg`).catch(() => undefined);
 				if (r?.status === 200) {
 					if (shot) URL.revokeObjectURL(shot);
