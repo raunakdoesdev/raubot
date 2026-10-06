@@ -18,20 +18,10 @@ export const browse = (code: string, timeout: number, env: Record<string, string
 type ResponsesPayload = { tools?: unknown[]; input?: { type?: string; output?: unknown }[] };
 type Part = { type: string; detail?: string; image_url?: string; text?: string };
 
-/** Screenshots to keep in a request; older ones become a note so long browser runs stay small. */
-const KEEP = 4;
-
-/** OpenAI Responses requests: newest screenshots at full detail (OpenAI's advice for computer use), plus OpenAI's own web search. */
 export const responses = (payload: unknown) => {
 	const p = payload as ResponsesPayload;
-	let seen = 0;
-	for (const item of [...(p.input ?? [])].reverse()) {
-		if (item.type !== "function_call_output" || !Array.isArray(item.output)) continue;
-		for (const part of [...(item.output as Part[])].reverse()) {
-			if (part.type !== "input_image") continue;
-			if (seen++ < KEEP) part.detail = "original";
-			else { part.type = "input_text"; part.text = "[older screenshot dropped]"; delete part.image_url; delete part.detail; }
-		}
-	}
+	for (const item of p.input ?? [])
+		if (item.type === "function_call_output" && Array.isArray(item.output))
+			for (const part of item.output as Part[]) if (part.type === "input_image") part.detail = "original";
 	return { ...p, tools: [...(p.tools ?? []), { type: "web_search" }] };
 };

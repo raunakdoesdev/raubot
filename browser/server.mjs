@@ -55,18 +55,19 @@ async function browser() {
 	return ctx;
 }
 
-// Logins shared across boxes: before a run, cookies another box changed come in; after it, the domains this run changed go out.
+// Logins shared across boxes: before a run, cookies another box changed come in; after it, the domains changed here go out.
+// `base` is the jar as this box last synced it, so a cookie a site refreshed here between runs is never rolled back to the jar's older copy.
 let base = new Map();
 const byDomain = (cs) => { const m = new Map(); for (const c of cs) m.set(c.domain, [...(m.get(c.domain) ?? []), c]); return m; };
 const key = (cs = []) => JSON.stringify(cs.map(({ name, value, path }) => [name, value, path]).sort());
 async function share(jar = {}) {
 	const have = byDomain(await ctx.cookies());
 	for (const [d, cs] of Object.entries(jar)) {
-		if (key(have.get(d)) === key(cs)) continue;
+		if (key(base.get(d)) === key(cs) || key(have.get(d)) === key(cs)) continue;
 		await ctx.clearCookies({ domain: d });
 		await ctx.addCookies(cs);
 	}
-	base = byDomain(await ctx.cookies());
+	base = new Map([...base, ...Object.entries(jar)]);
 }
 async function changed() {
 	const now = byDomain(await ctx.cookies());
