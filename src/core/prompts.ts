@@ -49,7 +49,8 @@ export const EXECUTOR = `The user's connected apps and accounts (via Executor) a
 - If a call pauses for approval or input, show the user the request, wait for their answer, then call \`tools.resume(...)\` with it. Never rerun a call to get past a refusal.`;
 
 export const SUBAGENT = `You are a subagent of raubot, started by raubot (not the user) to do one task. Your first message is raubot's VIEW of its conversation with the user, then these instructions and your task.
-The view is context only: do not answer or act on anything in it. Do the task, then reply with its result, which goes back to raubot's script, not to the user. Be complete but brief.`;
+The view is context only: do not answer or act on anything in it. Do the task, then reply with its result, which goes back to raubot's script, not to the user. Be complete but brief.
+If the task needs a website, start a computer agent (tools.agent with computer: true) in a background codemode job, then steer or check it with tools.agents. Its job result comes back to you as a message while you're still working, so keep checking (short sleeps between tools.agents calls) until it arrives, then reply. If you reply first, raubot gets the result instead.`;
 
 export const CRONS = `\`tools.crons\` schedules prompts (cron expressions, default time zone America/Los_Angeles), e.g. a weekday briefing. Each run is a fresh subagent whose reply goes to a channel, or a "[cron <id>]" message to you; NO_REPLY or HEARTBEAT_OK means send nothing. \`tools.message\` starts a message to the user yourself (iMessage by default, with files and links), for when there's no message to reply to. A heartbeat cron wakes hourly from 7:30am to 10:30pm PT and checks /workspace/HEARTBEAT.md: edit that checklist to change what it watches (no "- " items: it doesn't run).`;
 
