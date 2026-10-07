@@ -1,9 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { CAP } from "./prompts.ts";
 
-type Env = { BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; CF_DEPLOY_TOKEN: string; SPECTRUM_PROJECT_ID: string; SPECTRUM_PROJECT_SECRET: string };
-
-const ACCOUNT = "fadf1a80d9469afc81af5899893cd853";
+type Env = { BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; CLOUDFLARE_ACCOUNT_ID: string; BOX_GIT_EMAIL: string; CF_DEPLOY_TOKEN: string; SPECTRUM_PROJECT_ID: string; SPECTRUM_PROJECT_SECRET: string };
 
 /** Snapshot the whole box (installs, datasets, caches) when idle for IDLE, and at most every CHECKPOINT while in use. */
 const TICK = 60_000;
@@ -14,7 +12,7 @@ const clip = (s: string) => (s.length <= CAP ? s : `${s.slice(0, CAP / 2)}\n…[
 
 /** /workspace is a clone of the Artifacts repo `workspace`, auto-committed and pushed after every command; /workspace/raubot is raubot's own code. */
 const SETUP = `set -e
-git config --global user.name raubot && git config --global user.email raubot@reducto.ai && git config --global init.defaultBranch main
+git config --global user.name raubot && git config --global user.email "$BOX_GIT_EMAIL" && git config --global init.defaultBranch main
 cd /workspace
 [ -d .git ] || { git init -q && git remote add origin "$WORKSPACE_REMOTE" && git fetch -q origin main && git reset -q --hard origin/main && git branch -q -u origin/main; }
 git remote set-url origin "$WORKSPACE_REMOTE"
@@ -90,7 +88,8 @@ export class Computer extends DurableObject<Env> {
 				CLOUDFLARE_API_TOKEN: this.env.CF_DEPLOY_TOKEN,
 				SPECTRUM_PROJECT_ID: this.env.SPECTRUM_PROJECT_ID,
 				SPECTRUM_PROJECT_SECRET: this.env.SPECTRUM_PROJECT_SECRET,
-				CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+				CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
+				BOX_GIT_EMAIL: this.env.BOX_GIT_EMAIL,
 				...(this.#agent ? { BRANCH: this.#agent } : {}),
 			});
 			const image = c.images.box;

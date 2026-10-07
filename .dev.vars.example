@@ -1,0 +1,21 @@
+# Copy this file to .dev.vars. Never commit real values.
+# Non-secret overrides for local development (deployment vars are in wrangler.jsonc).
+PUBLIC_URL=http://localhost:8787
+CLOUDFLARE_ACCOUNT_ID=YOUR_CLOUDFLARE_ACCOUNT_ID
+BOX_GIT_EMAIL=raubot@example.com
+
+# Generate a base64-encoded 32-byte AES key with: openssl rand -base64 32
+SECRETS_KEY=REPLACE_WITH_A_BASE64_32_BYTE_KEY
+
+# Required for compaction with every provider, and the default main model.
+OPENROUTER_API_KEY=REPLACE_WITH_YOUR_OPENROUTER_API_KEY
+# OpenAI is also used by computer subagents and voice transcription.
+OPENAI_API_KEY=REPLACE_WITH_YOUR_OPENAI_API_KEY
+# Only needed when PROVIDER=anthropic.
+# ANTHROPIC_API_KEY=REPLACE_WITH_YOUR_ANTHROPIC_API_KEY
+
+# Optional: only needed for box self-deployment and iMessage.
+# CF_DEPLOY_TOKEN=REPLACE_WITH_A_SCOPED_WORKER_DEPLOY_TOKEN
+# SPECTRUM_PROJECT_ID=REPLACE_WITH_YOUR_SPECTRUM_PROJECT_ID
+# SPECTRUM_PROJECT_SECRET=REPLACE_WITH_YOUR_SPECTRUM_PROJECT_SECRET
+# SPECTRUM_WEBHOOK_SECRET=REPLACE_WITH_YOUR_SPECTRUM_WEBHOOK_SECRET
