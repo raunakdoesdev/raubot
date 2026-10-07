@@ -32,6 +32,12 @@ After the headless fix, staging runs on 3 boxes got no CAPTCHA, but Google signe
 
 Vercel SAML needs raunak@reducto.ai. Google Admin needs admin-raunak@reducto.ai.
 
+## Results on staging (3 boxes, commit ccbaed6)
+
+- No CAPTCHA and no headless user agent in any run.
+- raunak@reducto.ai: Google SAML for Vercel completed with the correct account (Google passkey, then Duo passkey). The other 2 boxes reused that Vercel session and loaded the members page.
+- admin-raunak@reducto.ai: sign-in worked, then Google showed "Your domain requires enrollment in 2-step verification". This is an account setting, so the run stopped there.
+
 ## Remaining risk
 
-On 1 of the 3 boxes, admin.google.com returned `/sorry/index` ("unusual traffic from your computer network"). That is Google reacting to the Cloudflare egress IP, not to the browser. If it happens often, route Google sign-ins through a trusted host such as the Mac mini.
+On 2 of the 3 boxes, admin.google.com returned `/sorry/index` ("unusual traffic from your computer network") before sign-in. Google listed two different addresses, for example `104.28.153.8 ≠ 2a09:bac1:...`, so it saw both the box's IPv4 and its IPv6 Cloudflare egress. This comes from the network, not the browser. The fix for it is to send Google sign-ins through a trusted host such as the Mac mini.
