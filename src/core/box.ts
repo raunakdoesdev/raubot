@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { CAP } from "./prompts.ts";
 
-type Env = { BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; CF_DEPLOY_TOKEN: string; SPECTRUM_PROJECT_ID: string; SPECTRUM_PROJECT_SECRET: string };
+type Env = { BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; CF_DEPLOY_TOKEN: string; SPECTRUM_PROJECT_ID: string; SPECTRUM_PROJECT_SECRET: string; OIDC_MINT_KEY?: string; PUBLIC_URL?: string };
 
 const ACCOUNT = "fadf1a80d9469afc81af5899893cd853";
 
@@ -91,6 +91,8 @@ export class Computer extends DurableObject<Env> {
 				SPECTRUM_PROJECT_ID: this.env.SPECTRUM_PROJECT_ID,
 				SPECTRUM_PROJECT_SECRET: this.env.SPECTRUM_PROJECT_SECRET,
 				CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+				// Mints Reducto Access agent tokens via POST /s/oidc/token (see raubot-oidc). The signing key stays in the Worker.
+				...(this.env.OIDC_MINT_KEY ? { RAUBOT_OIDC_MINT_KEY: this.env.OIDC_MINT_KEY, RAUBOT_URL: this.env.PUBLIC_URL ?? "https://raubot.reducto.ai" } : {}),
 				...(this.#agent ? { BRANCH: this.#agent } : {}),
 			});
 			const image = c.images.box;

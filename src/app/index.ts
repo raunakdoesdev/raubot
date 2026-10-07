@@ -4,10 +4,11 @@ import type { Computer } from "../core/box.ts";
 import og from "./og.png";
 import { TTLS } from "./ttl.ts";
 import { files } from "./files.ts";
+import { oidc, type OidcEnv } from "./oidc.ts";
 
 const TOKEN = /^\/s\/([\w-]{32})(\.json)?$/;
 
-export type EdgeEnv = { BOX: DurableObjectNamespace<Computer>; ASSETS: Fetcher };
+export type EdgeEnv = { BOX: DurableObjectNamespace<Computer>; ASSETS: Fetcher } & OidcEnv;
 
 /** Routes that need no core: the built pages (web/), the box status, and a secret link's page with its preview tags. */
 export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Promise<Response>) => {
@@ -16,6 +17,7 @@ export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Pro
 	if (pathname === "/" || pathname === "/settings" || pathname === "/tree" || pathname.startsWith("/assets/") || pathname === "/favicon.png" || pathname === "/raubot-512.png" || pathname === "/raubot-mascot.png" || pathname === "/apple-touch-icon.png") return asset(pathname);
 	// Secret links skip Access, so their page loads its assets relative to /s/.
 	if (pathname.startsWith("/s/assets/")) return asset(pathname.slice(2));
+	if (pathname.startsWith("/s/oidc/")) return oidc(req, env);
 	if (pathname === "/s/og.png") return new Response(og, { headers: { "content-type": "image/png", "cache-control": "public, max-age=86400" } });
 	const token = TOKEN.exec(pathname);
 	if (token && !token[2] && req.method === "GET") {
