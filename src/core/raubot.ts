@@ -1030,10 +1030,12 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			const [src, cur] = r.out.split("//@@CURSOR@@");
 			let cursor: unknown = null;
 			try { cursor = JSON.parse(cur.trim() || "null"); } catch {}
-			const code = `const __r = await (async (NOW, CURSOR) => {\n${src}\n})(${JSON.stringify(new Date().toISOString())}, ${JSON.stringify(cursor)});\nreturn JSON.stringify(__r);`;
+			const code = `const __r = await (async (NOW, CURSOR) => {\n${src}\n})(${JSON.stringify(new Date().toISOString())}, ${JSON.stringify(cursor)});\nreturn "@@DIGEST@@" + JSON.stringify(__r) + "@@END@@";`;
 			const out = await codemode(code, this.#tools("heartbeat"), {}, AbortSignal.timeout(120_000), this.#app, undefined, Date.now() + 110_000);
 			if (out.error) return { text: `(digest failed: ${out.text.slice(0, 300)})` };
-			const v = JSON.parse(out.text.slice(out.text.indexOf("{"))) as { text?: string; cursor?: unknown };
+			const m = /@@DIGEST@@([\s\S]*)@@END@@/.exec(out.text);
+			if (!m) return { text: `(digest failed: no result: ${out.text.slice(-300)})` };
+			const v = JSON.parse(m[1]) as { text?: string; cursor?: unknown };
 			return { text: hb.capDigest(String(v.text ?? "")), cursor: v.cursor };
 		} catch (e) { return { text: `(digest failed: ${String(e).slice(0, 300)})` }; }
 	}
