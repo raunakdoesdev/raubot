@@ -21,8 +21,17 @@ The local VM gave the same results, and branded Google Chrome gave the same resu
 - `navigator.webdriver`. It was already `false` because of `--disable-blink-features=AutomationControlled`.
 - The cookie jar. Google cookies already sync between boxes. A synced session does not help when every new sign-in goes to the Lite flow.
 
+## Second cause: the wrong account
+
+After the headless fix, staging runs on 3 boxes got no CAPTCHA, but Google signed in as sauhaarda@gmail.com every time, even after "Use another account". The vault has several google.com passkeys, and the virtual authenticator approves without a prompt. Google's passkey autofill on the email page used the first discoverable one before an email was typed.
+
 ## Fix
 
-`launch.mjs` starts Xvfb and runs the same Chromium with `headless: false`. The profile, cookie jar and Bitwarden passkeys do not change. The user agent is not spoofed and the CAPTCHA is not solved.
+- `launch.mjs` starts Xvfb and runs the same Chromium with `headless: false`. The profile and cookie jar do not change. The user agent is not spoofed and the CAPTCHA is not solved.
+- `passkeys.mjs` makes a passkey non-discoverable when its site has more than one passkey in the vault. The site must then ask for the email first, and Google requests the passkey of that account. Sites with one passkey keep usernameless sign-in.
 
-The account must sign in with the right identity. Vercel SAML needs raunak@reducto.ai and Google Admin needs admin-raunak@reducto.ai. If Google shows the wrong account, use "Use another account" or the account chooser.
+Vercel SAML needs raunak@reducto.ai. Google Admin needs admin-raunak@reducto.ai.
+
+## Remaining risk
+
+On 1 of the 3 boxes, admin.google.com returned `/sorry/index` ("unusual traffic from your computer network"). That is Google reacting to the Cloudflare egress IP, not to the browser. If it happens often, route Google sign-ins through a trusted host such as the Mac mini.
