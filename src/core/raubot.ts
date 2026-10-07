@@ -325,7 +325,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			inputSchema: Type.Object({ send: Type.Optional(Type.Object({ id: Type.Integer(), message: Type.String() })), stop: Type.Optional(Type.Array(Type.Integer())) }),
 			execute: () => Promise.reject(new Error("unbound")),
 		};
-		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF}\n\n${CRONS}\n\n${DEVIN}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
+		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF(this.env.PUBLIC_URL)}\n\n${CRONS}\n\n${DEVIN}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
 		nested.push(agentDoc, agentsDoc, {
 			name: "jobs",
 			description: "Your background jobs, newest first: { id, label, status, started, ended, deadline }. `cancel: [ids]` stops running ones (no result comes back); `prune: true` forgets finished ones.",

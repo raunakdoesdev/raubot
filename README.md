@@ -1,40 +1,114 @@
 # raubot
 
-A single endless chat whose history is its memory. Every message is kept verbatim in an append-only log. A binary tree of short summaries sits over the log. Each turn, the model sees a fresh, bounded view of the whole conversation: older stretches are summarized more coarsely, recent ones are finer. The model can `zoom` into any part of that view or check its `date`.
+## 1. What it is
 
-Built on [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable), which provides durable turns, tools and recovery. It runs inside a SQLite-backed Cloudflare Durable Object.
+raubot is a single-user personal agent with a Svelte web app and an optional iMessage channel.
+Its conversation is an append-only log. A binary tree of summaries gives the model a bounded view of the whole conversation. The agent can zoom into older messages when it needs more detail.
 
-The design follows Victor Taelin's [OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449) spec.
+It uses [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable) for durable turns, tools, and recovery. The memory design follows [OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449).
 
-## Layout
+## 2. Architecture
 
-- `src/worker.ts`: the Worker entry. It serves the app's edge routes and sends everything else to the `Raubot` Durable Object.
-- `src/core/`: raubot itself, with no UI code.
-  - `raubot.ts`: the `Raubot` Durable Object. It sets up the pi harness, the codemode tool and the hook that injects the view, and implements `Core` (`api.ts`), the interface clients use.
-  - `channels/`: one adapter per way of reaching the user besides the app (`imessage.ts` for now). Each `Channel` has a `name`, a reply `style` for the prompt, `receive` (webhook at `POST /<name>`, verified and deduped) and `send`. A turn's reply goes back to the channel of the message that started it. To add Slack, add `slack.ts` and register it in `channels/index.ts`.
-  - `codemode.ts`: the QuickJS runner. Scripts are durable: while one waits on tools, its VM is snapshotted (`freezer.ts`), and a restart thaws it.
-  - `agents.ts`: `tools.agent({ task, schema? })`, subagents as child pi-durable conversations.
-  - `jobs.ts`: background codemode jobs (label, timeout, max 100 running), which report back as `job` messages.
-  - `fx.ts`: the shared Effect services (`Storage`, `Box`) and `runner`, which runs effects at promise edges. Channels, jobs, agents, freezer and box are written with Effect.
-  - `memory.ts`: the log, the summary tree, the compactor (8 parallel jobs, retries) and the incremental view fold (128 KB budget, "most due pair" merging).
-  - `sql.ts`: pi-durable's `SqliteDatabase` interface over `ctx.storage.sql`.
-  - `prompts.ts`: the system and compactor prompts, plus the constants.
-  - `mcp.ts`, `oauth.ts`: the Executor client and its OAuth.
-  - `box.ts`: the `Computer` container (Durable Object scheduling policy, needed for snapshots) behind the `bash` tool. `/workspace` is a clone of the Artifacts repo `raubot/workspace`, auto-committed and pushed after every command (files over 10 MB are git-ignored). The whole container filesystem is also saved as a Container snapshot when idle for 10 minutes (and every 15 minutes while in use), so installs and big files persist. `/workspace/raubot` is a clone of this repo. The box rules (setup.sh, /scratch, self-deploy) live in `BOX.md`, which the prompt points raubot to.
-- `src/app/`: the web app, a client of `Core`. `index.ts` serves the chat, settings and tree pages, plus the `/ws` WebSocket that streams `CoreEvent`s.
+```text
+Web app / iMessage webhook / signed Devin callback
+                       |
+                 Cloudflare Worker
+                       |
+              Raubot Durable Object
+               SQLite log + summaries
+               durable tool execution
+                    /        \
+           model APIs       Computer Durable Object
+           Executor MCP       Linux container
+                              browser + Bitwarden
+                              Artifacts git workspace
+```
 
-## Source and deploys
+- `src/worker.ts` routes requests. `src/app/` serves pages, files, and the WebSocket stream.
+- `src/core/raubot.ts` connects the model, memory, tools, and channels. `api.ts` defines the client interface.
+- `memory.ts` stores the log and summary tree. `codemode.ts` runs QuickJS scripts. `freezer.ts` saves and restores waiting scripts.
+- `agents.ts`, `jobs.ts`, and `cron.ts` run subagents, background jobs, and scheduled prompts. `devin.ts` tracks signed session callbacks.
+- `mcp.ts` and `oauth.ts` connect Executor through OAuth with PKCE.
+- `box.ts` runs the Linux container. The Artifacts namespace contains two repositories: `workspace` for persistent files and `raubot` for source. Workspace changes are committed after commands. Container snapshots retain installs and large files. See `BOX.md` for the box rules.
+- `browser/` contains the browser and vault helpers. `imessage/` contains the Spectrum adapter.
+- `web/` contains the Svelte UI. Vite builds it into `web/dist`.
 
-The code lives in the Cloudflare Artifacts repo `raubot/raubot` (namespace `raubot`). raubot deploys itself from the box: it pushes to `main`, then runs `npx wrangler deploy` with the `CF_DEPLOY_TOKEN` secret (a token that can only deploy Workers). The box gets short-lived Artifacts git tokens from the `ARTIFACTS` binding, so there is no GitHub token.
+## 3. Local setup
 
-## Run
-
-Don't create tests unless the user asks for them.
+Use Node.js 22.12 or later, npm, and OpenSSL. Cloudflare deployment needs Durable Objects, Workers AI, Artifacts, and Containers with the Durable Object scheduling and snapshot APIs used by this project. Docker is needed for local container work.
 
 ```sh
-npm install
-echo "OPENAI_API_KEY=sk-..." > .dev.vars
-npm run dev       # http://localhost:8787
-npm run deploy    # raubot.reducto.ai, behind Cloudflare Access
-npm run deploy:staging    # raubot-staging.reducto.ai: separate chat, box and Artifacts namespace `raubot-staging`; test here, not on the main instance
+npm ci
+cp .dev.vars.example .dev.vars
 ```
+
+Edit `.dev.vars`. Replace the key placeholders with your own values. Generate `SECRETS_KEY` with `openssl rand -base64 32`. Keep this key stable: changing it makes stored secrets unreadable.
+
+```sh
+npm run dev
+```
+
+Open `http://localhost:8787`. Local chat requires the configured model credentials. Box, Artifacts, Workers AI, and iMessage features also need their Cloudflare or external services. They are not all offline emulators.
+
+## 4. Deployment configuration
+
+`wrangler.jsonc` is a template, not a ready-to-deploy personal configuration. Before deployment:
+
+1. Replace the example domains in `routes` and `PUBLIC_URL`. Use separate domains for the default and staging environments.
+2. Set `CLOUDFLARE_ACCOUNT_ID` and `BOX_GIT_EMAIL` in each environment's `vars`.
+3. Build and publish your own container image from `box/Dockerfile`. Replace the placeholder image URI in both `containers` entries. Keep the `box` image name. An existing container snapshot needs its original image; do not change a running instance's image without planning for snapshot loss.
+4. Create the Artifacts namespaces `raubot` and `raubot-staging`. Seed each with a `workspace` repository with an initial `main` commit, and a `raubot` repository containing this source and its `main` branch. The box clones those repositories, not GitHub.
+5. Set the Worker secrets below with `npx wrangler secret put NAME`. Repeat with `--env staging` for staging. `.dev.vars` only supplies local secrets.
+6. Protect the deployment with Cloudflare Access before it can receive traffic. The source does not create Access policies.
+
+Non-secret model settings are `PROVIDER`, `MODEL`, and `COMPACT_MODEL`. Supported main-model providers are `openai`, `anthropic`, and `openrouter`. The default uses OpenRouter. Compaction always uses OpenRouter; computer subagents use OpenAI. `EXECUTOR_URL` is the MCP endpoint. `PUBLIC_URL` is the external origin used for secret forms, file links, and callbacks. OAuth uses the request origin. Wrangler environment vars and bindings are not inherited by staging; keep both entries complete.
+
+After configuration and Access are ready, the deployment commands are:
+
+```sh
+npm run deploy:staging
+npm run deploy
+```
+
+Test on your own staging instance, not a live personal instance. If you enable self-deployment, the agent can push its Artifacts source and deploy it from the box with `CF_DEPLOY_TOKEN`.
+
+## 5. Required secrets and connections
+
+| Name | Used for | Required when |
+| --- | --- | --- |
+| `SECRETS_KEY` | Base64-encoded 32-byte AES-GCM key for user-provided secrets | Always |
+| `OPENROUTER_API_KEY` | Default main model and compactor | Always: compaction uses OpenRouter with every main-model provider |
+| `OPENAI_API_KEY` | OpenAI models, computer subagents, and voice transcription | `PROVIDER=openai`, computer use, or voice memos |
+| `ANTHROPIC_API_KEY` | Anthropic models | `PROVIDER=anthropic` |
+| `CF_DEPLOY_TOKEN` | Worker deployment from the box | Agent self-deployment; use a scoped token |
+| `SPECTRUM_PROJECT_ID` | Spectrum project selection | iMessage |
+| `SPECTRUM_PROJECT_SECRET` | Spectrum SDK authentication | iMessage |
+| `SPECTRUM_WEBHOOK_SECRET` | Inbound webhook HMAC verification | iMessage |
+
+Configure Spectrum to send webhooks to `PUBLIC_URL/imessage`. Executor is optional: visit `/oauth/start` to connect your own account. Its OAuth tokens live in Durable Object storage; they are not source configuration.
+
+For Bitwarden, use the agent's secret forms to supply `BW_CLIENTID`, `BW_CLIENTSECRET`, and `BW_PASSWORD`. These go into the encrypted user-secret store and reach box commands through their environment. They are not Worker vars. Browser packages are installed by box setup; install `browser/` and `imessage/` dependencies separately only when working on those helpers outside the box.
+
+Do not commit `.dev.vars`, `.env` files, credentials, vault exports, logs, or conversation data. `.dev.vars.example` contains placeholders only.
+
+## 6. Access and data
+
+This is not a multi-user service. All requests use the same personal Durable Object. Without Access, chat history, files, traces, settings, and agent controls are exposed.
+
+Protect all routes by default, including `/ws`, `/files.json`, `/file/*`, `/agent/*`, `/box`, and OAuth routes. Only exempt the specific integration paths you need: `/imessage` verifies Spectrum signatures; `/s/devin/*` verifies per-run HMAC signatures; `/s/*` uses secret-form capability tokens and serves their assets and preview image. Do not exempt other routes. Keep `workers_dev` disabled to avoid an alternate unprotected hostname.
+
+Conversation data, traces, OAuth tokens, workspace history, browser profiles, and container snapshots persist in your Cloudflare account. The file viewer's allowlist is not a substitute for authentication. Review data retention and the agent's broad shell, browser, and vault permissions before connecting personal accounts.
+
+## 7. Checks
+
+```sh
+npm run check   # Worker TypeScript
+npm test        # Existing cron and signed-callback tests
+npm run build   # Svelte production assets
+```
+
+There is no separate lint script. These checks do not deploy the Worker or exercise live integrations. Do not add tests unless requested.
+
+## 8. License
+
+No `LICENSE` file is present. The package metadata says `ISC`, but the owner must confirm the intended license before public release. This cleanup does not select a license.

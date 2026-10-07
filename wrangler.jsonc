@@ -5,29 +5,31 @@
 	"compatibility_flags": ["nodejs_compat"],
 	"workers_dev": false,
 	"rules": [{ "type": "Data", "globs": ["**/*.png"] }],
-	"build": { "command": "npx vite build web" },
+	"build": { "command": "npm run build" },
 	"assets": { "directory": "./web/dist", "binding": "ASSETS", "run_worker_first": true },
-	"routes": [{ "pattern": "raubot.reducto.ai", "custom_domain": true }],
+	"routes": [{ "pattern": "raubot.example.com", "custom_domain": true }],
 	"vars": { "PROVIDER": "openrouter",
-		"MODEL": "anthropic/claude-opus-5.5", "COMPACT_MODEL": "z-ai/glm-5.3-flash", "EXECUTOR_URL": "https://v2.executor.sh/mcp", "PUBLIC_URL": "https://raubot.reducto.ai" },
+		"MODEL": "anthropic/claude-opus-5.5", "COMPACT_MODEL": "z-ai/glm-5.3-flash", "EXECUTOR_URL": "https://v2.executor.sh/mcp", "PUBLIC_URL": "https://raubot.example.com",
+		"CLOUDFLARE_ACCOUNT_ID": "YOUR_CLOUDFLARE_ACCOUNT_ID", "BOX_GIT_EMAIL": "raubot@example.com" },
 	"ai": { "binding": "AI" },
 	"artifacts": [{ "binding": "ARTIFACTS", "namespace": "raubot" }],
 	"durable_objects": { "bindings": [{ "name": "RAUBOT", "class_name": "Raubot" }, { "name": "BOX", "class_name": "Computer" }] },
 	"observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": true }, "traces": { "enabled": true } },
 	"containers": [
-		{ "name": "raubot-computer", "class_name": "Computer", "scheduling_policy": "durable_object", "images": { "box": { "image": "registry.cloudflare.com/fadf1a80d9469afc81af5899893cd853/raubot-box@sha256:0d6d2719e889fffba49c110047f94611a89865cf5aff6f150877d04c7e578b4e" } } }
+		{ "name": "raubot-computer", "class_name": "Computer", "scheduling_policy": "durable_object", "images": { "box": { "image": "registry.cloudflare.com/YOUR_CLOUDFLARE_ACCOUNT_ID/raubot-box:YOUR_IMAGE_TAG" } } }
 	],
 	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Raubot"] }, { "tag": "v2", "new_sqlite_classes": ["Box"] }, { "tag": "v3", "new_sqlite_classes": ["Computer"] }, { "tag": "v4", "deleted_classes": ["Box"] }],
 	"env": {
 		"staging": {
-			"routes": [{ "pattern": "raubot-staging.reducto.ai", "custom_domain": true }],
+			"routes": [{ "pattern": "raubot-staging.example.com", "custom_domain": true }],
 			"vars": { "PROVIDER": "openrouter",
-				"MODEL": "anthropic/claude-opus-5.5", "COMPACT_MODEL": "z-ai/glm-5.3-flash", "EXECUTOR_URL": "https://v2.executor.sh/mcp", "PUBLIC_URL": "https://raubot-staging.reducto.ai" },
+				"MODEL": "anthropic/claude-opus-5.5", "COMPACT_MODEL": "z-ai/glm-5.3-flash", "EXECUTOR_URL": "https://v2.executor.sh/mcp", "PUBLIC_URL": "https://raubot-staging.example.com",
+				"CLOUDFLARE_ACCOUNT_ID": "YOUR_CLOUDFLARE_ACCOUNT_ID", "BOX_GIT_EMAIL": "raubot@example.com" },
 			"ai": { "binding": "AI" },
 			"artifacts": [{ "binding": "ARTIFACTS", "namespace": "raubot-staging" }],
 			"durable_objects": { "bindings": [{ "name": "RAUBOT", "class_name": "Raubot" }, { "name": "BOX", "class_name": "Computer" }] },
 			"containers": [
-				{ "name": "raubot-staging-computer", "class_name": "Computer", "scheduling_policy": "durable_object", "images": { "box": { "image": "registry.cloudflare.com/fadf1a80d9469afc81af5899893cd853/raubot-box@sha256:0d6d2719e889fffba49c110047f94611a89865cf5aff6f150877d04c7e578b4e" } } }
+				{ "name": "raubot-staging-computer", "class_name": "Computer", "scheduling_policy": "durable_object", "images": { "box": { "image": "registry.cloudflare.com/YOUR_CLOUDFLARE_ACCOUNT_ID/raubot-box:YOUR_IMAGE_TAG" } } }
 			]
 		}
 	}
