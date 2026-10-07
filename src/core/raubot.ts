@@ -16,7 +16,7 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
-import { BROWSER, COMPUTER, CRONS, DEVIN, EXECUTOR, HEARTBEAT, MARKS, MASTER, SELF, SETTLE, VIEW, VIEW_DOC } from "./prompts.ts";
+import { BROWSER, COMPUTER, CRONS, DEVIN, EXECUTOR, HEARTBEATS, MARKS, MASTER, SELF, SETTLE, VIEW, VIEW_DOC } from "./prompts.ts";
 import { browse, responses, type Jar } from "./computer.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Computer } from "./box.ts";
@@ -37,12 +37,20 @@ import { redact, Secrets, SecretsLive } from "./secrets.ts";
 import { type TraceEvent, Tracer } from "./trace.ts";
 import * as cron from "./cron.ts";
 import * as devin from "./devin.ts";
+import * as hb from "./heartbeat.ts";
 
 type Env = { SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
 
 type Services = Storage | Box | Jobs | JobHost | Secrets;
 type CronArgs = { add?: Partial<cron.Cron> & Pick<cron.Cron, "id" | "schedule" | "prompt">; remove?: string[]; run?: string };
 type DevinArgs = { add?: { purpose: string; key?: string; session?: string }; link?: { key: string; session: string }; close?: string[]; all?: boolean; check?: boolean; report?: string; error?: string };
+type HeartbeatArgs = { every?: string; activeHours?: { start: string; end: string; tz?: string }; ackMaxChars?: number; target?: "last" | "app" | "imessage"; pause?: boolean; run?: boolean };
+/** Buffered log line of a heartbeat turn, kept out of the log until the turn ends. */
+type Held = { kind: Msg["kind"]; text: string; date: number };
+/** The heartbeat turn in flight: when it started, its due tasks and the digest cursor to commit if it succeeds. */
+type Beat = { at: number; tasks: string[]; cursor?: unknown };
+/** Messages from raubot's own machinery, not the user. */
+const MACHINE = /^(\[via \w+\] )?\[(job \d+|secret \w+|cron [\w-]+|devin [\w-]+|heartbeat)[\] ]/;
 
 const SOL = { provider: "openai", modelId: "gpt-6.1-sol" };
 
@@ -294,6 +302,15 @@ Example: find the Slack messages that need the user's attention.
 			execute: (args: CronArgs) => this.#crons(args),
 		};
 		nested.push(messageDoc, cronsDoc, {
+			name: "heartbeat",
+			description: `Your heartbeat (see Heartbeats): no args shows its config and state { every, activeHours, ackMaxChars, target, paused, lastFire, nextDue, last, tasks }. Set every (e.g. "30m", "2h"), activeHours { start: "07:00", end: "23:00", tz? }, ackMaxChars, target ("last", "app" or "imessage"), pause (true/false). run: true fires one heartbeat as soon as you're idle (ignores active hours and pause).`,
+			inputSchema: Type.Object({
+				every: Type.Optional(Type.String()), activeHours: Type.Optional(Type.Object({ start: Type.String(), end: Type.String(), tz: Type.Optional(Type.String()) })),
+				ackMaxChars: Type.Optional(Type.Integer()), target: Type.Optional(Type.Union([Type.Literal("last"), Type.Literal("app"), Type.Literal("imessage")])),
+				pause: Type.Optional(Type.Boolean()), run: Type.Optional(Type.Boolean()),
+			}),
+			execute: (args: HeartbeatArgs) => this.#heartbeat(args),
+		}, {
 			name: "devin_runs",
 			description: `Registry of Devin sessions you started, with signed callbacks: use it instead of waiting on devin_session_gather. No args lists open runs.
 \`add: { purpose, key?, session? }\` registers a run before you create the session and returns { key, prompt, curl }: append prompt to the Devin session's prompt (it holds a signed curl Devin runs when it finishes or gets blocked). \`link: { key, session }\` records the Devin session id after creating it. \`close: [key or session id]\` closes runs; \`all: true\` lists closed ones too; \`check: true\` runs the safety-net check now.
@@ -326,7 +343,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			inputSchema: Type.Object({ send: Type.Optional(Type.Object({ id: Type.Integer(), message: Type.String() })), stop: Type.Optional(Type.Array(Type.Integer())) }),
 			execute: () => Promise.reject(new Error("unbound")),
 		};
-		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF}\n\n${CRONS}\n\n${DEVIN}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
+		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF}\n\n${CRONS}\n\n${HEARTBEATS}\n\n${DEVIN}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
 		nested.push(agentDoc, agentsDoc, {
 			name: "jobs",
 			description: "Your background jobs, newest first: { id, label, status, started, ended, deadline }. `cancel: [ids]` stops running ones (no result comes back); `prune: true` forgets finished ones.",
@@ -459,20 +476,24 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				fresh.push(...page.items);
 				cursor = page.next;
 			} while (cursor);
+			const beat = await this.ctx.storage.get<Beat>("hb-turn");
+			const held: Held[] = beat ? JSON.parse(this.memory.get("hb-held") ?? "[]") : [];
+			const log = (kind: Msg["kind"], body: string, date: number) => (beat ? void (body.trim() && held.push({ kind, text: body, date })) : this.#log(kind, body, date));
 			for (const e of fresh.filter((e) => e.id !== last).reverse()) {
 				for (const m of e.model ?? []) {
 					const date = m.timestamp ?? Date.now();
 					if (m.role === "assistant" && m.usage) this.#usage({ date, ...m.usage });
-					if (m.role === "user") { const t = text(m.content); this.#log(/^(\[via \w+\] )?\[devin [\w-]+ /.test(t) ? "devin" : /^(\[via \w+\] )?\[(job \d+|secret \w+|cron [\w-]+)[\] ]/.test(t) ? "job" : "user", t, date); }
-					else if (m.role === "toolResult") this.#log("echo", `${m.toolName}: ${text(m.content)}`, date);
+					if (m.role === "user") { const t = text(m.content); log(/^(\[via \w+\] )?\[devin [\w-]+ /.test(t) ? "devin" : /^(\[via \w+\] )?\[(job \d+|secret \w+|cron [\w-]+|heartbeat)[\] ]/.test(t) ? "job" : "user", t, date); }
+					else if (m.role === "toolResult") log("echo", `${m.toolName}: ${text(m.content)}`, date);
 					else for (const b of m.content) {
 						if (typeof b === "string") continue;
-						if (b.type === "text") this.#log("talk", b.text, date);
-						else if (b.type === "toolCall") this.#log("tool", `${b.name} ${JSON.stringify(b.arguments)}`, date);
+						if (b.type === "text") log("talk", b.text, date);
+						else if (b.type === "toolCall") log("tool", `${b.name} ${JSON.stringify(b.arguments)}`, date);
 					}
 				}
 				this.memory.set("entry", String(e.id));
-			}
+				}
+				if (beat) { this.memory.set("hb-held", JSON.stringify(held)); await this.#settleBeat(beat, held); }
 		});
 	}
 
@@ -527,7 +548,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	async #deliver() {
 		const r = await this.ctx.storage.get<Origin & { start: number }>("reply");
 		const said = r && !this.busy() && this.memory.log.slice(r.start).filter((m) => m.kind === "talk").at(-1)?.text;
-		const reply = said && !cron.SILENT.test(said) ? said : undefined;
+		const reply = said && !cron.SILENT.test(said) ? hb.scrub(said) || undefined : undefined;
 		if (r && !reply && !this.busy() && this.memory.log.length > r.start + 1) { // ended silent
 			await this.ctx.storage.delete("reply");
 			await this.#fx(idle(this.#channels, r));
@@ -701,6 +722,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	/** Every message comes from a channel; non-app ones are tagged for the model and get the turn's reply. */
 	async send(input: string, from: Origin = APP, files: string[] = []) {
+		// The user's own messages set where heartbeat alerts go (target "last").
+		if (!MACHINE.test(input)) await this.ctx.storage.put("last-from", from);
 		input = tag(from, [input, ...files.map((f) => `[attached: ${f}]`)].filter(Boolean).join("\n"));
 		if (from.channel !== APP.channel) {
 			await this.ctx.storage.put({ reply: { ...from, start: this.memory.log.length }, [`origin:${from.channel}`]: from });
@@ -849,7 +872,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	/** One alarm serves memory, jobs and crons: set it to the earliest of `at` and the next cron, never later than one already set. */
 	async #arm(at = Infinity) {
-		const when = Math.min(at, await this.#fx(cron.wake), (await this.ctx.storage.get<number>("devin-next")) ?? Infinity);
+		const when = Math.min(at, await this.#fx(cron.wake), (await this.ctx.storage.get<number>("devin-next")) ?? Infinity, await this.#hbWake());
 		const set = await this.ctx.storage.getAlarm();
 		if (when < Infinity && (set === null || when < set)) await this.ctx.storage.setAlarm(Math.max(when, Date.now()));
 	}
@@ -858,6 +881,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		this.memory.pump();
 		for (const c of await this.#fx(cron.due(Date.now()))) await this.#fire(c).catch((e) => this.#fx(cron.record(c.id, `failed to start: ${String(e).slice(0, 200)}`)));
 		await this.#devinTick().catch((e) => console.error("devin check", e));
+		await this.#tick().catch((e) => console.error("heartbeat", e));
 		const busy = (await this.#fx(Effect.flatMap(Jobs, (j) => j.resume()))) || this.memory.pending();
 		await this.#arm(busy ? Date.now() + 30_000 : Infinity);
 	}
@@ -920,11 +944,154 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		return new Response("ok");
 	}
 
-	/** The heartbeat cron, created once (removing it sticks). It reads HEARTBEAT.md and stays silent unless something needs the user. */
+	/** Once: the old hourly heartbeat cron (a fresh subagent per run) gives way to the main-turn heartbeat, so the two never double-fire. */
 	async #seed() {
-		if (await this.ctx.storage.get("cron-seeded")) return;
-		await this.#fx(cron.put({ id: "heartbeat", schedule: "30 7-22 * * *", tz: cron.TZ, prompt: HEARTBEAT, mode: "agent", channel: "imessage", unless: "! grep -q '^[[:space:]]*- ' /workspace/HEARTBEAT.md", timeout: 900, enabled: true }));
-		await this.ctx.storage.put("cron-seeded", true);
+		if (await this.ctx.storage.get("hb-migrated")) return;
+		await this.#fx(cron.remove(["heartbeat"]));
+		await this.ctx.storage.put({ "hb-migrated": true, "cron-seeded": true });
+		await this.#hbState();
+	}
+
+	async #hbState(): Promise<hb.State> {
+		const s = await this.ctx.storage.get<hb.State>("hb-state");
+		if (s) return s;
+		const fresh: hb.State = { ...hb.DEFAULT, tasks: {}, nextDue: hb.nextTick(Date.now(), hb.DEFAULT) };
+		await this.ctx.storage.put("hb-state", fresh);
+		return fresh;
+	}
+
+	/** When the alarm must wake for the heartbeat: its next tick, a deferral, or soon while a heartbeat turn runs. */
+	async #hbWake() {
+		const s = await this.ctx.storage.get<hb.State>("hb-state");
+		if (!s) return Infinity;
+		const w = (await this.ctx.storage.get<number>("hb-wake")) ?? Infinity;
+		if (await this.ctx.storage.get("hb-turn")) return Math.min(w, Date.now() + hb.RETRY);
+		if (w < Infinity) return w;
+		if (s.paused && !s.wanted) return Infinity;
+		return s.wanted ? Date.now() : s.nextDue ?? Infinity;
+	}
+
+	/** Busy for heartbeats: a turn runs, inputs wait, or a cron run is in flight. User messages always win. */
+	async #hbBusy() {
+		if (this.busy() || (await this.#queued()).length) return true;
+		const jobs = await this.#fx(Effect.flatMap(Jobs, (j) => j.list()));
+		return jobs.some((j) => j.status === "running" && j.label.startsWith("cron "));
+	}
+
+	/** The alarm's heartbeat step: close a stuck turn, else fire, defer or skip per hb.decide. */
+	async #tick() {
+		const beat = await this.ctx.storage.get<Beat>("hb-turn");
+		if (beat) {
+			if (!this.busy() && Date.now() - beat.at > hb.STUCK) await this.#endBeat(beat, { status: "failed", reason: "no reply" });
+			return;
+		}
+		const wake = await this.ctx.storage.get<number>("hb-wake");
+		if (wake !== undefined && wake > Date.now()) return;
+		const s = await this.#hbState();
+		const d = hb.decide(Date.now(), s, await this.#hbBusy());
+		await this.ctx.storage.delete("hb-wake");
+		if (d.act === "defer") await this.ctx.storage.put("hb-wake", d.at);
+		else if (d.act === "quiet") await this.ctx.storage.put("hb-state", { ...s, nextDue: d.at, last: { at: Date.now(), status: "skipped", reason: "quiet-hours" } });
+		else if (d.act === "fire") await this.#beat(s, d.at!);
+	}
+
+	/** One heartbeat: HEARTBEAT.md, due tasks and the user's sent-message digest go in as a "[heartbeat]" turn of raubot's own conversation. */
+	async #beat(s: hb.State, nextDue: number) {
+		const now = Date.now(), manual = !!s.wanted;
+		const base: hb.State = { ...s, wanted: false, lastFire: now, nextDue };
+		const skip = (reason: string) => this.ctx.storage.put("hb-state", { ...base, last: { at: now, status: "skipped", reason } });
+		const cat = await this.#fx(Effect.flatMap(Box, (b) => b.exec("cat /workspace/HEARTBEAT.md", "", 30))).catch(() => undefined);
+		const md = cat && cat.exitCode === 0 ? cat.out : undefined;
+		if (md !== undefined && hb.empty(md)) return skip("empty-heartbeat-file");
+		const { body, tasks } = md === undefined ? { body: undefined, tasks: [] } : hb.parse(md);
+		const due = hb.dueTasks(tasks, s.tasks, now);
+		if (tasks.length && !due.length && (!body || hb.empty(body)) && !manual) return skip("no-due-tasks");
+		const digest = await this.#digest();
+		const input = hb.input({ stamp: cron.stamp(s.activeHours.tz, now), md: body, due, digest: digest.text, manual });
+		const started = await this.#serial(async () => {
+			if (await this.#hbBusy()) return false;
+			const beat: Beat = { at: now, tasks: due.map((t) => t.name), cursor: digest.cursor };
+			await this.ctx.storage.put({ "hb-turn": beat, "hb-state": { ...base, last: { at: now, status: "running" } } });
+			this.memory.set("hb-held", "[]");
+			this.memory.set("pinned", this.memory.render());
+			await this.root.reset(undefined, C);
+			await this.root.submit({ type: "input", content: input }, C);
+			return true;
+		});
+		if (!started) await this.ctx.storage.put({ "hb-wake": Date.now() + hb.RETRY, "hb-state": { ...s } });
+		else await this.#sync();
+	}
+
+	/** Pre-turn deterministic script: /workspace/watch/sent.js (the user's own Slack, Devin and email sends since its cursor). The cursor is committed only when the turn succeeds. */
+	async #digest(): Promise<{ text: string; cursor?: unknown }> {
+		try {
+			const r = await this.#fx(Effect.flatMap(Box, (b) => b.exec("cd /workspace && (git pull -q >/dev/null 2>&1 || true); cat watch/sent.js && printf '\\n//@@CURSOR@@\\n' && (cat watch/sent-cursor.json 2>/dev/null || echo null)", "", 60)));
+			if (r.exitCode !== 0 || !r.out.includes("//@@CURSOR@@")) return { text: "(digest unavailable: /workspace/watch/sent.js missing)" };
+			const [src, cur] = r.out.split("//@@CURSOR@@");
+			let cursor: unknown = null;
+			try { cursor = JSON.parse(cur.trim() || "null"); } catch {}
+			const code = `const __r = await (async (NOW, CURSOR) => {\n${src}\n})(${JSON.stringify(new Date().toISOString())}, ${JSON.stringify(cursor)});\nreturn JSON.stringify(__r);`;
+			const out = await codemode(code, this.#tools("heartbeat"), {}, AbortSignal.timeout(120_000), this.#app, undefined, Date.now() + 110_000);
+			if (out.error) return { text: `(digest failed: ${out.text.slice(0, 300)})` };
+			const v = JSON.parse(out.text.slice(out.text.indexOf("{"))) as { text?: string; cursor?: unknown };
+			return { text: hb.capDigest(String(v.text ?? "")), cursor: v.cursor };
+		} catch (e) { return { text: `(digest failed: ${String(e).slice(0, 300)})` }; }
+	}
+
+	/** After each sync of a heartbeat turn: once it ends, an OK is dropped (a short note logged as one line), an alert is logged and delivered, and a turn a user message joined is logged in full. */
+	async #settleBeat(beat: Beat, held: Held[]) {
+		if (this.busy()) return;
+		const at = held.findIndex((h) => h.kind === "job" && h.text.startsWith(hb.TAG));
+		const replyAt = held.findLastIndex((h) => h.kind === "talk");
+		if (at < 0 || replyAt < at) return; // not started or no reply yet; #tick closes stuck turns
+		if (held.some((h, i) => i !== at && (h.kind === "user" || h.kind === "devin" || (h.kind === "job" && !h.text.startsWith(hb.TAG))))) {
+			for (const h of held) this.#log(h.kind, h.text, h.date);
+			return this.#endBeat(beat, { status: "mixed" }, true);
+		}
+		const s = await this.#hbState();
+		const v = hb.judge(held[replyAt].text, s.ackMaxChars);
+		if (v.kind === "ok") {
+			if (v.text) this.#log("job", `[heartbeat] ok: ${v.text.slice(0, 500)}`, Date.now());
+			return this.#endBeat(beat, { status: "ok", ...(v.text && { note: v.text.slice(0, 500) }) }, true);
+		}
+		held[replyAt] = { ...held[replyAt], text: v.text };
+		for (const h of held) this.#log(h.kind, h.text, h.date);
+		const status = await this.#hbDeliver(s, v.text);
+		return this.#endBeat(beat, { status }, true);
+	}
+
+	/** Alerts go where the user last wrote from (target "last") or to a fixed channel; a failed send falls back to the app, which shows the log. */
+	async #hbDeliver(s: hb.State, text: string) {
+		const to = s.target === "last" ? ((await this.ctx.storage.get<Origin>("last-from")) ?? APP) : s.target === "app" ? APP : await this.#origin(s.target).catch(() => APP);
+		if (to.channel === APP.channel) return "alerted via app";
+		try { await this.#fx(deliver(this.#channels, to, text)); return `alerted via ${to.channel}`; }
+		catch (e) { console.error("heartbeat deliver", e); return `alerted via app (${to.channel} failed)`; }
+	}
+
+	async #endBeat(beat: Beat, out: Omit<hb.Outcome, "at">, ok = false) {
+		const s = await this.#hbState();
+		const tasks = { ...s.tasks };
+		if (ok) for (const t of beat.tasks) tasks[t] = beat.at;
+		await this.ctx.storage.put("hb-state", { ...s, tasks, last: { at: Date.now(), ...out } });
+		await this.ctx.storage.delete("hb-turn");
+		this.memory.set("hb-held", "[]");
+		if (ok && beat.cursor) await this.#fx(write("/workspace/watch/sent-cursor.json", new TextEncoder().encode(JSON.stringify(beat.cursor)))).catch((e) => console.error("cursor", e));
+		await this.#arm();
+	}
+
+	/** `tools.heartbeat`. */
+	async #heartbeat({ every, activeHours, ackMaxChars, target, pause, run }: HeartbeatArgs) {
+		let s = await this.#hbState();
+		if (every !== undefined && !hb.duration(every)) throw new Error(`bad every "${every}" (use e.g. 30m, 2h)`);
+		if (activeHours && ![activeHours.start, activeHours.end].every((t) => /^\d\d?:\d\d$/.test(t))) throw new Error("activeHours start/end: HH:MM");
+		s = { ...s, ...(every && { every }), ...(activeHours && { activeHours: { ...activeHours, tz: activeHours.tz ?? s.activeHours.tz } }), ...(ackMaxChars !== undefined && { ackMaxChars }), ...(target && { target }), ...(pause !== undefined && { paused: pause }), ...(run && { wanted: true }) };
+		if (every || activeHours) s.nextDue = hb.nextTick(s.lastFire ?? Date.now(), s);
+		await this.ctx.storage.put("hb-state", s);
+		if (run) await this.ctx.storage.delete("hb-wake");
+		await this.#arm(run ? Date.now() + 5_000 : Infinity);
+		const pt = (t?: number) => (t ? `${new Date(t).toLocaleString("en-US", { timeZone: cron.TZ, dateStyle: "medium", timeStyle: "short" })} PT` : undefined);
+		const turn = await this.ctx.storage.get<Beat>("hb-turn");
+		return JSON.stringify({ ...s, lastFire: pt(s.lastFire), nextDue: pt(s.nextDue), last: s.last && { ...s.last, at: pt(s.last.at) }, tasks: Object.fromEntries(Object.entries(s.tasks).map(([k, v]) => [k, pt(v)])), ...(turn && { running: pt(turn.at) }), ...(run && { note: "Fires as soon as raubot is idle (after this turn)." }) });
 	}
 
 	/** Where a channel reaches the user: the last place they wrote from on it. */
