@@ -2,13 +2,12 @@
 // Started on demand by cli.mjs; restarted by it when this code changes.
 import http from "node:http";
 import fs from "node:fs";
-import { chromium } from "playwright";
 import * as vault from "./vault.mjs";
 import { attach } from "./passkeys.mjs";
+import { launch } from "./launch.mjs";
 
 export const SOCK = "/tmp/raubot-browser.sock";
 const DIR = `${process.env.HOME}/.raubot`;
-const VIEWPORT = { width: 1440, height: 900 };
 
 let ctx, page, env = {}, keys;
 const tabs = new Map(); // page -> authenticator
@@ -41,13 +40,7 @@ async function loadKeys(fresh = false) {
 
 async function browser() {
 	if (ctx) return ctx;
-	fs.mkdirSync(`${DIR}/browser`, { recursive: true });
-	// A box copied from a snapshot keeps the original box's Chromium locks; this server is the profile's only user.
-	for (const f of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) fs.rmSync(`${DIR}/browser/${f}`, { force: true });
-	ctx = await chromium.launchPersistentContext(`${DIR}/browser`, {
-		channel: "chromium", headless: true, viewport: VIEWPORT, deviceScaleFactor: 1, acceptDownloads: true, ...(fs.existsSync("/workspace") ? { downloadsPath: "/workspace/uploads/downloads" } : {}),
-		args: ["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-	});
+	ctx = await launch(`${DIR}/browser`, { acceptDownloads: true, ...(fs.existsSync("/workspace") ? { downloadsPath: "/workspace/uploads/downloads" } : {}) });
 	ctx.on("page", (p) => { page = p; void arm(p); });
 	ctx.on("close", () => { ctx = undefined; tabs.clear(); });
 	for (const p of ctx.pages()) await arm(p);
@@ -122,7 +115,7 @@ const ops = {
 	version: async () => VERSION,
 };
 
-const VERSION = ["server.mjs", "vault.mjs", "passkeys.mjs"].map((f) => fs.statSync(new URL(f, import.meta.url)).mtimeMs).join(":");
+const VERSION = ["server.mjs", "launch.mjs", "vault.mjs", "passkeys.mjs"].map((f) => fs.statSync(new URL(f, import.meta.url)).mtimeMs).join(":");
 
 fs.rmSync(SOCK, { force: true });
 http.createServer(async (req, res) => {
