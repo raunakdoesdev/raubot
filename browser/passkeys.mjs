@@ -4,9 +4,9 @@ const b64 = (s) => Buffer.from(s, "base64url").toString("base64");
 
 export const rawId = (id) => (id.startsWith("b64.") ? Buffer.from(id.slice(4), "base64url") : Buffer.from(id.replace(/-/g, ""), "hex"));
 
-export const credential = (p) => ({
+export const credential = (p, discoverable = p.discoverable !== "false") => ({
 	credentialId: rawId(p.credentialId).toString("base64"),
-	isResidentCredential: p.discoverable !== "false",
+	isResidentCredential: discoverable,
 	rpId: p.rpId,
 	privateKey: b64(p.keyValue),
 	...(p.userHandle ? { userHandle: b64(p.userHandle) } : {}),
@@ -16,6 +16,16 @@ export const credential = (p) => ({
 	...(p.userName ? { userName: p.userName } : {}),
 	...(p.userDisplayName ? { userDisplayName: p.userDisplayName } : {}),
 });
+
+/**
+ * The authenticator's credentials. When a site has several passkeys (Google: raunak@, admin-raunak@, a gmail account), none is discoverable:
+ * otherwise the site's passkey autofill signs in with whichever comes first before an email is typed. The site then asks for the passkey of the typed account.
+ */
+export const credentials = (passkeys) => {
+	const n = new Map();
+	for (const p of passkeys) n.set(p.rpId, (n.get(p.rpId) ?? 0) + 1);
+	return passkeys.map((p) => [p, credential(p, n.get(p.rpId) === 1 && p.discoverable !== "false")]);
+};
 
 /**
  * A platform authenticator on `page` that verifies the user without prompting. `set` replaces its passkeys.
@@ -34,8 +44,7 @@ export async function attach(page, onUse = () => {}) {
 		async set(passkeys) {
 			await s.send("WebAuthn.clearCredentials", { authenticatorId });
 			byId = new Map();
-			for (const p of passkeys) {
-				const c = credential(p);
+			for (const [p, c] of credentials(passkeys)) {
 				byId.set(c.credentialId, p);
 				await s.send("WebAuthn.addCredential", { authenticatorId, credential: c }).catch((e) => console.error(`passkey ${p.rpId}: ${e.message}`));
 			}

@@ -17,7 +17,7 @@ export async function xvfb() {
 	process.on("exit", () => x.kill());
 	display = await new Promise((ok, fail) => {
 		let s = "";
-		x.stdio[3].on("data", (d) => { s += d; if (s.includes("\n")) ok(`:${s.trim()}`); });
+		x.stdio[3].on("data", (d) => { s += d; if (s.includes("\n")) { x.stdio[3].destroy(); x.unref(); ok(`:${s.trim()}`); } });
 		x.on("exit", (code) => fail(new Error(`Xvfb exited (${code})`)));
 	});
 	return display;
