@@ -1035,7 +1035,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			if (out.error) return { text: `(digest failed: ${out.text.slice(0, 300)})` };
 			const m = /@@DIGEST@@([\s\S]*)@@END@@/.exec(out.text);
 			if (!m) return { text: `(digest failed: no result: ${out.text.slice(-300)})` };
-			const v = JSON.parse(m[1]) as { text?: string; cursor?: unknown };
+			// codemode prints a returned string JSON-quoted, so the payload comes back escaped.
+			const v = (() => { try { return JSON.parse(m[1]); } catch { return JSON.parse(JSON.parse(`"${m[1]}"`)); } })() as { text?: string; cursor?: unknown };
 			return { text: hb.capDigest(String(v.text ?? "")), cursor: v.cursor };
 		} catch (e) { return { text: `(digest failed: ${String(e).slice(0, 300)})` }; }
 	}
