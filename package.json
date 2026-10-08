@@ -6,7 +6,7 @@
     "deploy": "wrangler deploy",
     "deploy:staging": "wrangler deploy --env staging",
     "check": "tsc -p .",
-    "test": "tsx test/heartbeat.test.ts && tsx test/cron.test.ts && tsx test/devin.test.ts && tsx test/oidc.test.ts && tsx test/access.test.ts"
+    "test": "tsx test/heartbeat.test.ts && tsx test/cron.test.ts && tsx test/devin.test.ts && tsx test/oidc.test.ts && tsx test/access.test.ts && tsx test/memory.test.ts"
   },
   "keywords": [],
   "author": "",

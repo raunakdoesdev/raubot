@@ -16,7 +16,9 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
-import { BROWSER, COMPUTER, CRONS, DEVIN, EXECUTOR, HEARTBEATS, MARKS, MASTER, SELF, SETTLE, VIEW, VIEW_DOC } from "./prompts.ts";
+import { BROWSER, COMPACTIONS, COMPUTER, CRONS, DEVIN, EXECUTOR, HEARTBEATS, HIGH, MASTER, SELF, SETTLE, VIEW_DOC } from "./prompts.ts";
+import { pieces } from "./pieces.ts";
+export { pieces };
 import { browse, responses, type Jar } from "./computer.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Computer } from "./box.ts";
@@ -67,30 +69,21 @@ const CONFIRM = {
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
 
-/** Cut the view at the last line end before each mark; every piece but the tail ends on a cache breakpoint. */
-export const pieces = (view: string) => {
-	const out: string[] = [];
-	let at = 0;
-	for (const mark of MARKS) {
-		if (mark >= view.length) break;
-		const cut = view.lastIndexOf("\n", mark) + 1;
-		if (cut > at) out.push(view.slice(at, (at = cut)));
-	}
-	return { out: [...out, view.slice(at)], marks: out.length };
-};
-
 type Block = { cache_control?: unknown };
 type AnthropicPayload = { system?: Block[] | string; tools?: Block[]; messages?: { role: string; content: Block[] | string }[] };
 
-/** Anthropic allows 4 breakpoints: the view's marks plus pi's request-end mark. System and tools sit inside the first view mark's prefix. */
+/** Anthropic marks: the system prompt (after tools, so it covers both), the view's last whole block, and pi's request-end mark. No 1h TTL. */
 const WEB_SEARCH = { type: "openrouter:web_search", parameters: { max_results: 5 } } as unknown as Block;
 
-const markView = (marks: number) => (payload: unknown) => {
+export const markView = (mark: number) => (payload: unknown) => {
 	const p = payload as AnthropicPayload;
 	const first = p.messages?.find((m) => m.role === "user");
-	if (!marks || !first || typeof first.content === "string") return undefined;
-	for (const b of [...(Array.isArray(p.system) ? p.system : []), ...(p.tools ?? [])]) delete b.cache_control;
-	for (const b of first.content.slice(0, marks)) b.cache_control = { type: "ephemeral" };
+	if (mark < 0 || !first || typeof first.content === "string" || !first.content[mark]) return undefined;
+	for (const b of p.tools ?? []) delete b.cache_control;
+	const sys = Array.isArray(p.system) ? p.system : [];
+	sys.forEach((b, k) => { if (k < sys.length - 1) delete b.cache_control; else b.cache_control = { type: "ephemeral" }; });
+	for (const b of first.content) delete b.cache_control;
+	first.content[mark].cache_control = { type: "ephemeral" };
 	return p;
 };
 
@@ -110,7 +103,8 @@ export class Raubot extends DurableObject<Env> implements Core {
 	#partial = "";
 	#steering = "[]";
 	#delivering = false;
-	#marks = 0;
+	#marks = -1;
+	#compact: { system: string; tools: { name: string; description: string; parameters: never }[] } | undefined;
 	#prompt = "";
 	#fx!: <A, E>(e: Effect.Effect<A, E, Services>) => Promise<A>;
 	#channels!: Channels;
@@ -180,14 +174,23 @@ export class Raubot extends DurableObject<Env> implements Core {
 stream(model, context, model.api === "anthropic-messages" ? { ...options, sessionId: `raubot-${this.ctx.id}`, onPayload: (p: unknown) => withSearch(model.provider, markView(this.#marks)(p) ?? (p as AnthropicPayload)) }
 				: model.api === "openai-responses" ? { ...options, onPayload: responses } : options);
 		const compactor = models.getModel("openrouter", this.env.COMPACT_MODEL)!;
-		this.memory = new Memory(this.ctx.storage.sql, async (systemPrompt, prompt) => {
+		// A compaction is a call like a turn: same system prompt and tools (never called), then its <chat> view and its task (OptChat).
+		this.memory = new Memory(this.ctx.storage.sql, async (chat, turns, started) => {
 			const t0 = Date.now();
-			const r = await models.completeSimple(compactor, { systemPrompt, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, {
+			const c = this.#compact;
+			if (!c) throw new Error("compactor not ready");
+			const now = Date.now();
+			const messages = turns.map((t, k) => t.role === "user"
+				? { role: "user" as const, content: k === 0 ? [{ type: "text" as const, text: chat }, { type: "text" as const, text: t.text }] : t.text, timestamp: now }
+				: { role: "assistant" as const, content: [{ type: "text" as const, text: t.text }], api: compactor.api, provider: compactor.provider, model: compactor.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop" as const, timestamp: now });
+			const s = models.streamSimple(compactor, { systemPrompt: c.system, tools: c.tools, messages } as never, {
 				reasoning: "low", signal: AbortSignal.timeout(30_000),
-				// Fastest provider first, and fall back to Luna when GLM errors or is rate-limited.
-				onPayload: (p: unknown) => ({ ...(p as object), provider: { sort: "latency" }, models: [this.env.COMPACT_MODEL, "openai/gpt-6-luna"] }),
+				// Fastest provider first, and fall back to Luna when GLM errors or is rate-limited. Tools are there for the cache only.
+				onPayload: (p: unknown) => ({ ...(p as object), tool_choice: "none", provider: { sort: "latency" }, models: [this.env.COMPACT_MODEL, "openai/gpt-6-luna"] }),
 			});
-			console.log("compact call", JSON.stringify({ ms: Date.now() - t0, bytes: prompt.length, stop: r.stopReason, ...r.usage, cost: r.usage.cost?.total }));
+			for await (const e of s) { started(); if (e.type === "done" || e.type === "error") break; }
+			const r = await s.result();
+			console.log("compact call", JSON.stringify({ ms: Date.now() - t0, bytes: chat.length, tries: (turns.length + 1) / 2, stop: r.stopReason, ...r.usage, cost: r.usage.cost?.total }));
 			if (r.stopReason === "error" || r.stopReason === "aborted") throw new Error(r.errorMessage ?? r.stopReason);
 			return text(r.content);
 		}, () => this.#changed());
@@ -344,7 +347,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			inputSchema: Type.Object({ send: Type.Optional(Type.Object({ id: Type.Integer(), message: Type.String() })), stop: Type.Optional(Type.Array(Type.Integer())) }),
 			execute: () => Promise.reject(new Error("unbound")),
 		};
-		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF}\n\n${CRONS}\n\n${HEARTBEATS}\n\n${DEVIN}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
+		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF}\n\n${CRONS}\n\n${HEARTBEATS}\n\n${DEVIN}${executor.app ? `\n\n${EXECUTOR}` : ""}\n\n${COMPACTIONS}`;
 		nested.push(agentDoc, agentsDoc, {
 			name: "jobs",
 			description: "Your background jobs, newest first: { id, label, status, started, ended, deadline }. `cancel: [ids]` stops running ones (no result comes back); `prune: true` forgets finished ones.",
@@ -389,15 +392,17 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			})],
 		});
 		registry.install(this.#computer);
+		const codemodeParams = Type.Object({
+			code: Type.String({ description: "Raw JavaScript source." }),
+			background: Type.Optional(Type.Object({ label: Type.String(), timeout: Type.Integer({ description: "Seconds, max 86400." }) })),
+		});
+		this.#compact = { system, tools: [{ name: "codemode", description: describe(nested), parameters: codemodeParams as never }] };
 		const raubot = defineExtension({
 			name: "raubot",
 			sections: [section("raubot", () => system, { tag: false })],
 			tools: [defineTool({
 				name: "codemode", replay: "safe", description: describe(nested),
-				parameters: Type.Object({
-					code: Type.String({ description: "Raw JavaScript source." }),
-					background: Type.Optional(Type.Object({ label: Type.String(), timeout: Type.Integer({ description: "Seconds, max 86400." }) })),
-				}),
+				parameters: codemodeParams,
 				execute: async ({ code, background }, api, ctx) => {
 					if (background) {
 						// A subagent's job (e.g. a cron run waiting on a computer agent) reports back to it while it runs, else to raubot.
@@ -426,8 +431,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 					if (at < 0) return undefined;
 					const first = messages[at] as Extract<Message, { role: "user" }>;
 					const body = typeof first.content === "string" ? [{ type: "text" as const, text: first.content }] : first.content;
-					const { out, marks } = pieces(`<view>\n${memory.get("pinned") ?? ""}\n</view>\n\nNew message:\n`);
-					this.#marks = marks;
+					const { out, mark } = pieces(memory.get("pinned") ?? "");
+					this.#marks = mark;
 					return { messages: messages.with(at, { ...first, content: [...out.map((text) => ({ type: "text" as const, text })), ...body] }) };
 				},
 			})],
@@ -540,7 +545,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		const roots = [];
 		for (let l = 31, a = 0; l >= 0; l--) if (T & (1 << l)) { roots.push(part(l, a >> l)); a += 1 << l; }
 		return {
-			log: T, pending: m.pending(), bytes: new TextEncoder().encode(m.render()).length, budget: VIEW,
+			log: T, pending: m.pending(), bytes: new TextEncoder().encode(m.render()).length, budget: HIGH,
 			roots, view: m.view.map(([l, i]) => part(l, i)), usage: JSON.parse(m.get("usage") ?? "[]"),
 		};
 	}
