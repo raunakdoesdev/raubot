@@ -33,7 +33,7 @@ import * as files from "./files.ts";
 import { MAX_BYTES, MAX_LINES } from "./files.ts";
 import { JobHost, Jobs, JobsLive } from "./jobs.ts";
 import { OAuth } from "./oauth.ts";
-import { redact, Secrets, SecretsLive } from "./secrets.ts";
+import { failedNote, redact, Secrets, SecretsLive } from "./secrets.ts";
 import { type TraceEvent, Tracer } from "./trace.ts";
 import * as cron from "./cron.ts";
 import * as devin from "./devin.ts";
@@ -205,7 +205,7 @@ stream(model, context, model.api === "anthropic-messages" ? { ...options, sessio
 					const c = cmd ?? command;
 					if (typeof c !== "string") return yield* Effect.fail(new Error("bash needs cmd (or command)"));
 					const env = yield* Effect.flatMap(Secrets, (s) => s.env());
-					return redact(env, yield* bash(c, Math.min(timeout ?? 120, 900), env));
+					return redact(env, yield* bash(c, Math.min(timeout ?? 120, 900), env)) + failedNote(env);
 				}).pipe(Effect.provide(BoxLive(ns, box)))),
 			},
 			{
@@ -381,7 +381,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 					if (r.changed && Object.keys(r.changed).length) await main.jarPut(r.changed);
 					console.log("browser jar", JSON.stringify({ box: this.#boxOf(api.conversationId), jar: Object.keys(jar).length, changed: Object.keys(r.changed ?? {}) }));
 					return {
-						content: [{ type: "text", text: redact(env, `${r.out || "(no output)"}\n\ntabs (* is page):\n${r.tabs}`) }, ...r.images.map((data) => ({ type: "image" as const, mimeType: "image/jpeg", data }))],
+						content: [{ type: "text", text: redact(env, `${r.out || "(no output)"}\n\ntabs (* is page):\n${r.tabs}`) + failedNote(env) }, ...r.images.map((data) => ({ type: "image" as const, mimeType: "image/jpeg", data }))],
 						isError: r.error,
 					};
 				},

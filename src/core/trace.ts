@@ -1,6 +1,8 @@
 // Live traces of codemode scripts: each run and the nested tool calls inside it, for the web UI.
 // Summaries stream to clients; full args/results are fetched on expand. Recent runs live in memory; finished runs persist (capped) in storage.
 import type { Hooks } from "./codemode.ts";
+/** Secret-link tokens (/s/<32 chars>) never go into traces. Same rule as app/access.ts scrub. */
+const scrub = (s: string) => s.replace(/\/s\/[\w-]{32}(?![\w-])/g, "/s/[link]");
 
 export type CallStatus = "running" | "ok" | "failed";
 /** One nested call, as streamed: short summaries only. */
@@ -23,7 +25,7 @@ export const fnv = (s: string) => {
 
 const one = (s: string, n = SUM) => { const x = s.replace(/\s+/g, " ").trim(); return x.length > n ? x.slice(0, n - 1) + "…" : x; };
 const cut = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "\n… (" + (s.length - n) + " more chars)" : s);
-const str = (v: unknown) => (typeof v === "string" ? v : v === undefined ? "" : JSON.stringify(v, null, 1));
+const str = (v: unknown) => scrub(typeof v === "string" ? v : v === undefined ? "" : JSON.stringify(v, null, 1));
 /** Profile ids and other uuids make app paths unreadable; keep the meaningful segments. */
 const appName = (path: string[]) => path.filter((k) => k !== "profiles" && !/^ins_|^[0-9a-f]{8}-/.test(k)).join(".");
 
@@ -85,7 +87,7 @@ export class Tracer {
 				const i = byId.get(id);
 				const c = i === undefined ? undefined : live.calls[i];
 				if (!c || c.status !== "running") return;
-				let out = payload;
+				let out = scrub(payload);
 				if (ok) { try { out = str(JSON.parse(payload)); } catch {} }
 				c.status = ok ? "ok" : "failed"; c.ms = Date.now() - c.start; c.out = one(out);
 				if (!ok) head.failed++;

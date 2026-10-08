@@ -2,6 +2,7 @@
 import { Data, Effect } from "effect";
 import type { Origin } from "./channels/index.ts";
 import { kv } from "./fx.ts";
+import { same } from "./crypto.ts";
 
 /** One run raubot started. key is raubot's own id (known before Devin gives a session id); session is the Devin id once linked. */
 export type Run = {
@@ -41,13 +42,6 @@ export const sign = async (secret: string, msg: string) => {
 	return hex(await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(msg)));
 };
 
-/** Constant-time compare of two equal-format hex strings. */
-const same = (a: string, b: string) => {
-	if (a.length !== b.length) return false;
-	let d = 0;
-	for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
-	return d === 0;
-};
 
 /** Ready-to-paste lines for a Devin prompt. Body: plain-text summary. Signature: hex HMAC-SHA256(secret, "<ts>.<status>.<body>"). */
 export const curl = (url: string, r: Run) => {

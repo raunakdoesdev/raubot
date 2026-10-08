@@ -22,13 +22,8 @@ const enc = (o: object) => b64url(new TextEncoder().encode(JSON.stringify(o)));
 type Jwk = JsonWebKey & { kid: string };
 export const publicJwk = (p: Jwk) => ({ kty: "RSA", n: p.n!, e: p.e!, kid: p.kid, alg: "RS256", use: "sig" });
 
-/** Constant-time string compare. */
-export const same = (a: string, b: string) => {
-	const x = new TextEncoder().encode(a), y = new TextEncoder().encode(b);
-	let d = x.length ^ y.length;
-	for (let i = 0; i < Math.max(x.length, y.length); i++) d |= (x[i] ?? 0) ^ (y[i] ?? 0);
-	return d === 0;
-};
+import { same } from "../core/crypto.ts";
+export { same };
 
 export const validAudience = (aud: string) => AUDIENCE.test(aud);
 

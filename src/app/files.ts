@@ -67,8 +67,7 @@ const page = async (env: EdgeEnv, url: URL): Promise<Response> => {
 /** GET /files.json?path= (no path: the roots), GET /file?path=&offset=&length=&dl=1, GET /file/<path>. */
 export const files = async (req: Request, env: EdgeEnv, url: URL): Promise<Response> => {
 	if (req.method !== "GET") return new Response("method not allowed", { status: 405 });
-	// Behind Cloudflare Access like the rest of the app; refuse if Access isn't in front (except local dev).
-	if (!req.headers.get("cf-access-jwt-assertion") && !/^(localhost|127\.0\.0\.1)$/.test(url.hostname)) return new Response("forbidden", { status: 403 });
+	// Access: the Worker's default-deny gate (access.ts) has verified the JWT before this runs.
 	if (url.pathname.startsWith("/file/")) return page(env, url);
 	const q = url.searchParams, path = q.get("path") ?? "";
 	if (url.pathname === "/files.json") {

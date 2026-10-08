@@ -5,10 +5,13 @@ import og from "./og.png";
 import { TTLS } from "./ttl.ts";
 import { files } from "./files.ts";
 import { oidc, type OidcEnv } from "./oidc.ts";
+import { type AccessEnv, identity } from "./access.ts";
 
 const TOKEN = /^\/s\/([\w-]{32})(\.json)?$/;
+/** Secret-link pages never pass their URL (the token) on as a Referer, and aren't cached. */
+const noReferrer = (r: Response) => { const o = new Response(r.body, r); o.headers.set("referrer-policy", "no-referrer"); o.headers.set("cache-control", "no-store"); return o; };
 
-export type EdgeEnv = { BOX: DurableObjectNamespace<Computer>; ASSETS: Fetcher } & OidcEnv;
+export type EdgeEnv = { BOX: DurableObjectNamespace<Computer>; ASSETS: Fetcher } & OidcEnv & AccessEnv;
 
 /** Routes that need no core: the built pages (web/), the box status, and a secret link's page with its preview tags. */
 export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Promise<Response>) => {
@@ -19,7 +22,18 @@ export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Pro
 	if (pathname.startsWith("/s/assets/")) return asset(pathname.slice(2));
 	if (pathname.startsWith("/s/oidc/")) return oidc(req, env);
 	if (pathname === "/s/og.png") return new Response(og, { headers: { "content-type": "image/png", "cache-control": "public, max-age=86400" } });
+	// Access-gated (the Worker gate already checked): signs in, then back to a secret link so its form can save.
+	if (pathname === "/login") {
+		const next = url.searchParams.get("next") ?? "/";
+		return Response.redirect(new URL(TOKEN.test(next) || next === "/" ? next : "/", url).toString(), 302);
+	}
 	const token = TOKEN.exec(pathname);
+	// The ask behind a link (public, read-only) plus whether this browser is signed in to Access, so the form knows if it can save.
+	if (token && token[2] && req.method === "GET") {
+		const r = await core(req);
+		if (!r.ok) return r;
+		return Response.json({ ...((await r.json()) as object), signedIn: !!(await identity(req, env)) }, { headers: { "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+	}
 	if (token && !token[2] && req.method === "GET") {
 		const r = await core(new Request(new URL(`/s/${token[1]}.json`, url)));
 		const a = r.ok ? ((await r.json()) as { name: string; why: string }) : undefined;
@@ -30,7 +44,7 @@ export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Pro
 			.on('meta[property="og:title"]', set(title))
 			.on('meta[property="og:description"]', set(desc))
 			.on('meta[property="og:image"]', set(`${url.origin}/s/og.png`))
-			.transform(await asset("/secret"));
+			.transform(noReferrer(await asset("/secret")));
 	}
 	if (pathname === "/files.json" || pathname === "/file" || pathname.startsWith("/file/")) return files(req, env, url);
 	const screen = /^\/agent\/(\d+)\/screen\.jpg$/.exec(pathname);
@@ -77,8 +91,9 @@ export const serve = async (core: Core, req: Request): Promise<Response> => {
 			return a ? Response.json({ name: a.name, why: a.why }) : new Response("expired", { status: 404 });
 		}
 		if (req.method === "DELETE") { await core.dismiss(token); return new Response("dismissed"); }
+		// Writes reach here only with a verified Access JWT (worker gate): a leaked link alone can't set or drop a secret.
 		if (req.method === "POST") {
-			const { value, ttl } = (await req.json()) as { value?: string; ttl?: number };
+			const { value, ttl } = ((await req.json().catch(() => ({}))) ?? {}) as { value?: string; ttl?: number };
 			try { await core.answer(token, String(value ?? ""), TTLS.some(([, s]) => s === ttl) ? ttl : undefined); }
 			catch (e) { return new Response(e instanceof Error ? e.message : String(e), { status: 400 }); }
 			return new Response("saved");

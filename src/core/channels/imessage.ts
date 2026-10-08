@@ -1,4 +1,5 @@
 import { Effect } from "effect";
+import { same } from "../crypto.ts";
 import { bash, kv } from "../fx.ts";
 import { type Channel, ChannelError, images } from "./index.ts";
 
@@ -31,7 +32,7 @@ const signed = (secret: string, h: Headers, body: string) => Effect.promise(asyn
 	if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
 	const enc = new TextEncoder();
 	const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-	return sig === `v0=${hex(await crypto.subtle.sign("HMAC", key, enc.encode(`v0:${ts}:${body}`)))}`;
+	return same(sig, `v0=${hex(await crypto.subtle.sign("HMAC", key, enc.encode(`v0:${ts}:${body}`)))}`);
 });
 
 const b64 = (s: string) => btoa(String.fromCharCode(...new TextEncoder().encode(s)));

@@ -3,7 +3,7 @@
 	import SecretForm from "$lib/SecretForm.svelte";
 
 	const token = location.pathname.split("/").pop()!;
-	const ask = fetch(`/s/${token}.json`).then((r) => (r.ok ? (r.json() as Promise<{ name: string; why: string }>) : undefined));
+	const ask = fetch(`/s/${token}.json`).then((r) => (r.ok ? (r.json() as Promise<{ name: string; why: string; signedIn?: boolean }>) : undefined));
 </script>
 
 <main class="grid min-h-dvh place-items-center p-4">
@@ -15,7 +15,7 @@
 			{:else}
 				<Card.Root class="py-5"><Card.Header class="px-5">
 					<Card.Title class="text-[15px]">This link has expired</Card.Title>
-					<Card.Description>It was already used, or it's more than 7 days old. Ask raubot for a new one.</Card.Description>
+					<Card.Description>It was already used, or it's more than an hour old. Ask raubot for a new one.</Card.Description>
 				</Card.Header></Card.Root>
 			{/if}
 		{/await}
