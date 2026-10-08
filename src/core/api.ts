@@ -58,4 +58,6 @@ export interface Core {
 	agentIndex(): Promise<Omit<AgentRow, "last">[]>;
 	/** POST /s/devin/<key>: a Devin run's signed callback. */
 	devinHook(key: string, req: Request): Promise<Response>;
+	/** POST /s/devin/<key>/image: a Devin run's signed screenshot upload. */
+	devinImage(key: string, req: Request): Promise<Response>;
 }

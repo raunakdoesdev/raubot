@@ -82,7 +82,7 @@ const SECRET_LINK = /^\/s\/[\w-]{32}(\.json)?$/;
 /** Public routes (Access bypasses /imessage and /s/*); each has its own check further in. Writes to secret links are NOT here. */
 export const exempt = (method: string, path: string) => {
 	if (path === "/imessage") return method === "POST";
-	if (/^\/s\/devin\/[\w-]{6,64}$/.test(path)) return true; // HMAC-signed, POST only (else 405)
+	if (/^\/s\/devin\/[\w-]{6,64}(\/image)?$/.test(path)) return true; // HMAC-signed, POST only (else 405)
 	if (path.startsWith("/s/oidc/")) return true; // public JWKS/discovery; minting needs OIDC_MINT_KEY
 	if (path === "/s/og.png" || path === "/s/favicon.png" || path === "/s/apple-touch-icon.png" || path.startsWith("/s/assets/")) return method === "GET" || method === "HEAD";
 	if (SECRET_LINK.test(path)) return method === "GET" || method === "HEAD"; // the form page + its ask; no side effects

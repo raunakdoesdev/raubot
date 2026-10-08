@@ -43,7 +43,7 @@ type Env = { SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNames
 
 type Services = Storage | Box | Jobs | JobHost | Secrets;
 type CronArgs = { add?: Partial<cron.Cron> & Pick<cron.Cron, "id" | "schedule" | "prompt">; remove?: string[]; run?: string };
-type DevinArgs = { add?: { purpose: string; key?: string; session?: string }; link?: { key: string; session: string }; close?: string[]; all?: boolean; check?: boolean; report?: string; error?: string };
+type DevinArgs = { add?: { purpose: string; key?: string; session?: string }; link?: { key: string; session: string }; prompt?: string; close?: string[]; all?: boolean; check?: boolean; report?: string; error?: string };
 type HeartbeatArgs = { every?: string; activeHours?: { start: string; end: string; tz?: string }; ackMaxChars?: number; target?: "last" | "app" | "imessage"; pause?: boolean; run?: boolean };
 /** Buffered log line of a heartbeat turn, kept out of the log until the turn ends. */
 type Held = { kind: Msg["kind"]; text: string; date: number };
@@ -313,11 +313,12 @@ Example: find the Slack messages that need the user's attention.
 		}, {
 			name: "devin_runs",
 			description: `Registry of Devin sessions you started, with signed callbacks: use it instead of waiting on devin_session_gather. No args lists open runs.
-\`add: { purpose, key?, session? }\` registers a run before you create the session and returns { key, prompt, curl }: append prompt to the Devin session's prompt (it holds a signed curl Devin runs when it finishes or gets blocked). \`link: { key, session }\` records the Devin session id after creating it. \`close: [key or session id]\` closes runs; \`all: true\` lists closed ones too; \`check: true\` runs the safety-net check now.
-A valid callback comes to you as a "[devin <id> done|blocked|failed]" message with Devin's summary. Every hour a safety net reads each open run's Devin status: finished-without-callback, blocked (waiting for user) and stuck (>24h) runs come the same way; finished ones close.`,
+\`add: { purpose, key?, session? }\` registers a run before you create the session and returns { key, prompt, curl }: append prompt to the Devin session's prompt (it holds a signed curl Devin runs when it finishes or gets blocked). \`link: { key, session }\` records the Devin session id after creating it. \`prompt: key or session id\` gives an open run's lines again (e.g. to message a running session the devin_image upload helper). \`close: [key or session id]\` closes runs; \`all: true\` lists closed ones too; \`check: true\` runs the safety-net check now.
+A valid callback comes to you as a "[devin <id> done|blocked|failed]" message with Devin's summary. Every hour a safety net reads each open run's Devin status: finished-without-callback, blocked (waiting for user) and stuck (>24h) runs come the same way; finished ones close. Screenshots the session uploaded with devin_image come attached to that message as "[attached: uploads/devin/...]" lines.`,
 			inputSchema: Type.Object({
 				add: Type.Optional(Type.Object({ purpose: Type.String(), key: Type.Optional(Type.String()), session: Type.Optional(Type.String()) })),
 				link: Type.Optional(Type.Object({ key: Type.String(), session: Type.String() })),
+				prompt: Type.Optional(Type.String({ description: "Run key or session id: gives its prompt lines (devin_done + devin_image) again." })),
 				close: Type.Optional(Type.Array(Type.String())),
 				all: Type.Optional(Type.Boolean()), check: Type.Optional(Type.Boolean()),
 				report: Type.Optional(Type.String({ description: "Internal: the safety net's devin_session_interact get output." })),
@@ -898,19 +899,20 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	}
 
 	/** Delivers Devin messages, one per channel they came from. */
-	async #devinSay(items: { run: devin.Run; text?: string }[]) {
-		const by = new Map<string, { from: Origin; lines: string[] }>();
-		for (const { run, text } of items) {
+	async #devinSay(items: { run: devin.Run; text?: string; images?: string[] }[]) {
+		const by = new Map<string, { from: Origin; lines: string[]; files: string[] }>();
+		for (const { run, text, images = [] } of items) {
 			if (!text) continue;
-			const k = JSON.stringify(run.from), g = by.get(k) ?? { from: run.from, lines: [] };
+			const k = JSON.stringify(run.from), g = by.get(k) ?? { from: run.from, lines: [], files: [] };
 			g.lines.push(text);
+			g.files.push(...images);
 			by.set(k, g);
 		}
-		for (const g of by.values()) await this.send(g.lines.join("\n\n"), g.from);
+		for (const g of by.values()) await this.send(g.lines.join("\n\n"), g.from, g.files);
 	}
 
 	/** \`tools.devin_runs\`. */
-	async #devin({ add, link, close = [], all, check, report, error }: DevinArgs) {
+	async #devin({ add, link, prompt, close = [], all, check, report, error }: DevinArgs) {
 		if (add) {
 			const from = (await this.ctx.storage.get<Origin>("reply")) ?? APP;
 			const r = await this.#fx(devin.add(add.purpose, { channel: from.channel, to: from.to }, add.key, add.session));
@@ -919,6 +921,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			return JSON.stringify({ key: r.key, ...devin.curl(this.env.PUBLIC_URL, r) });
 		}
 		if (link) return JSON.stringify(devin.show(await this.#fx(devin.link(link.key, link.session))));
+		if (prompt) {
+			const r = await this.#fx(devin.find(prompt));
+			if (!r) throw new Error("no run " + prompt);
+			return JSON.stringify({ key: r.key, ...devin.curl(this.env.PUBLIC_URL, r) });
+		}
 		if (close.length) await this.#fx(devin.close(close));
 		if (report !== undefined) {
 			const items = devin.review(await this.#fx(devin.open), report);
@@ -940,8 +947,23 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		const r = await this.#fx(devin.callback(key, url.searchParams.get("status") ?? "done", req.headers.get("x-raubot-ts") ?? "", req.headers.get("x-raubot-sig") ?? "", body).pipe(
 			Effect.map((ok) => ({ ok })), Effect.catchTag("DevinError", (e) => Effect.succeed({ err: e }))));
 		if ("err" in r) return new Response(r.err.message, { status: r.err.status });
-		await this.send(r.ok.text, r.ok.run.from);
+		await this.send(r.ok.text, r.ok.run.from, r.ok.images);
 		return new Response("ok");
+	}
+
+	/** POST /s/devin/<key>/image?name=<file>: a signed screenshot upload. Saved in the box (shrunk to 2000px), held on the run until its next delivered message. */
+	async devinImage(key: string, req: Request) {
+		const url = new URL(req.url);
+		const len = Number(req.headers.get("content-length") ?? 0);
+		if (len > devin.MAX_IMAGE) return new Response("too big", { status: 413 });
+		const bytes = new Uint8Array(await req.arrayBuffer());
+		const r = await this.#fx(devin.image(key, url.searchParams.get("name") ?? "image", req.headers.get("x-raubot-ts") ?? "", req.headers.get("x-raubot-sig") ?? "", bytes).pipe(
+			Effect.map((ok) => ({ ok })), Effect.catchTag("DevinError", (e) => Effect.succeed({ err: e }))));
+		if ("err" in r) return new Response(r.err.message, { status: r.err.status });
+		await this.#fx(write(r.ok.path, bytes));
+		const f = "/workspace/" + r.ok.path;
+		await this.#fx(bash("command -v mogrify >/dev/null && mogrify -resize '2000x2000>' " + JSON.stringify(f) + "; true", 60)).catch(() => undefined);
+		return Response.json({ ok: true, path: r.ok.path });
 	}
 
 	/** Once: the old hourly heartbeat cron (a fresh subagent per run) gives way to the main-turn heartbeat, so the two never double-fire. */

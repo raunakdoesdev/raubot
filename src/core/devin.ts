@@ -10,6 +10,25 @@ export type Run = {
 	/** Last Devin status seen ("running/working", "exit/...") or the last callback ("callback:done"). */
 	last?: string; checked?: number; notified?: string; flagged?: boolean; summary?: string;
 	secret: string; from: Origin; seen?: Record<string, number>;
+	/** Box paths (relative to /workspace) of images Devin uploaded that no delivered message carried yet. */
+	images?: string[];
+};
+
+/** Images Devin may upload per run, and the byte cap for one. */
+export const MAX_IMAGES = 40;
+export const MAX_IMAGE = 15 << 20;
+/** Where a run's uploaded images land in the box, relative to /workspace. */
+export const imageDir = (r: Run, now = Date.now()) => "uploads/devin/" + bare(r.session ?? r.key) + "/" + new Date(now).toISOString().slice(0, 10);
+/** png, jpeg, gif or webp by magic bytes, else undefined. */
+export const imageType = (b: Uint8Array) =>
+	b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 ? "png"
+	: b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff ? "jpg"
+	: b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 ? "gif"
+	: b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50 ? "webp"
+	: undefined;
+const safeName = (name: string, ext: string) => {
+	const base = (name.split("/").pop() ?? "").replace(/\.[^.]*$/, "").replace(/[^\w-]+/g, "_").slice(0, 60) || "image";
+	return base + "." + ext;
 };
 
 export class DevinError extends Data.TaggedError("DevinError")<{ message: string; status: number }> {}
@@ -46,12 +65,16 @@ export const sign = async (secret: string, msg: string) => {
 /** Ready-to-paste lines for a Devin prompt. Body: plain-text summary. Signature: hex HMAC-SHA256(secret, "<ts>.<status>.<body>"). */
 export const curl = (url: string, r: Run) => {
 	const endpoint = url + "/s/devin/" + r.key;
+	const img = "devin_image() { F=\"$1\"; N=$(basename \"$F\"); T=$(date +%s); H=$(openssl dgst -sha256 -r \"$F\" | cut -d' ' -f1); G=$(printf '%s' \"$T.image.$N.$H\" | openssl dgst -sha256 -hmac '" + r.secret + "' -r | cut -d' ' -f1); "
+		+ "curl -sS -X POST \"" + endpoint + "/image?name=$N\" -H \"x-raubot-ts: $T\" -H \"x-raubot-sig: $G\" -H 'content-type: application/octet-stream' --data-binary @\"$F\"; }";
 	const fn = "devin_done() { S=\"$1\"; B=\"$2\"; T=$(date +%s); G=$(printf '%s' \"$T.$S.$B\" | openssl dgst -sha256 -hmac '" + r.secret + "' -r | cut -d' ' -f1); "
 		+ "curl -sS -X POST '" + endpoint + "?status='\"$S\" -H \"x-raubot-ts: $T\" -H \"x-raubot-sig: $G\" -H 'content-type: text/plain' --data-binary \"$B\"; }";
 	return {
 		endpoint,
 		curl: fn,
-		prompt: "When you finish or get blocked, run this in a shell. Status is done, blocked or failed; then a 1-3 sentence summary with PR links:\n" + fn + "\ndevin_done done \"<summary>\"",
+		image: img,
+		prompt: "When you finish or get blocked, run this in a shell. Status is done, blocked or failed; then a 1-3 sentence summary with PR links:\n" + fn + "\ndevin_done done \"<summary>\""
+			+ "\nBefore that, upload each screenshot that shows your result (png/jpg/gif/webp, one call per file) so raubot can forward it:\n" + img + "\ndevin_image ./screenshot.png",
 	};
 };
 
@@ -78,6 +101,28 @@ export const close = (ids: string[]) => Effect.forEach(ids, (id) => Effect.gen(f
 	return r?.key;
 }));
 
+/** Checks a signed image upload (signature over "<ts>.image.<name>.<sha256 hex of bytes>"); gives the run and the box path to save to. */
+export const image = (key: string, name: string, ts: string, sig: string, bytes: Uint8Array, now = Date.now()) => Effect.gen(function* () {
+	const r = KEY.test(key) ? yield* get(key) : undefined;
+	if (!r) return yield* fail("unknown run", 404);
+	const t = Number(ts);
+	if (!ts || !Number.isInteger(t) || Math.abs(now / 1000 - t) > SKEW) return yield* fail("stale or missing timestamp", 401);
+	if (!bytes.length || bytes.length > MAX_IMAGE) return yield* fail("image: 1 byte to " + (MAX_IMAGE >> 20) + " MB", 413);
+	const hash = hex(yield* Effect.promise(() => crypto.subtle.digest("SHA-256", bytes)));
+	const want = yield* Effect.promise(() => sign(r.secret, ts + ".image." + name + "." + hash));
+	if (!/^[0-9a-f]{64}$/.test(sig) || !same(sig, want)) return yield* fail("bad signature", 401);
+	const seen = Object.fromEntries(Object.entries(r.seen ?? {}).filter(([, v]) => v > now - 2 * SKEW * 1000));
+	if (seen[sig]) return yield* fail("replayed", 409);
+	const ext = imageType(bytes);
+	if (!ext) return yield* fail("not a png, jpeg, gif or webp image", 415);
+	if ((r.images?.length ?? 0) >= MAX_IMAGES) return yield* fail("too many images for this run", 429);
+	seen[sig] = now;
+	const path = imageDir(r, now) + "/" + now.toString(36) + "-" + safeName(name, ext);
+	const next: Run = { ...r, seen, images: [...(r.images ?? []), path] };
+	yield* update(next);
+	return { run: next, path };
+});
+
 export const message = (r: Run, status: string, summary?: string) =>
 	"[devin " + (r.session ?? r.key) + " " + status + "] " + r.purpose + (summary ? "\n" + summary : "") + (r.session ? "\nhttps://app.devin.ai/sessions/" + bare(r.session) : "");
 
@@ -94,9 +139,9 @@ export const callback = (key: string, status: string, ts: string, sig: string, b
 	if (seen[sig]) return yield* fail("replayed", 409);
 	seen[sig] = now;
 	const summary = body.trim().slice(0, 2000);
-	const next: Run = { ...r, seen, summary, last: "callback:" + status, notified: "callback:" + status, status: status === "blocked" ? "open" : "closed" };
+	const next: Run = { ...r, seen, summary, last: "callback:" + status, notified: "callback:" + status, status: status === "blocked" ? "open" : "closed", images: [] };
 	yield* update(next);
-	return { run: next, text: message(next, status, summary) };
+	return { run: next, text: message(next, status, summary), images: r.images ?? [] };
 });
 
 /** Parses devin_session_interact get text into session id -> fields. */
@@ -123,7 +168,7 @@ export const judge = (r: Run, status: string, detail: string, now = Date.now()):
 
 /** Applies one Devin get result to the open runs: gives updated runs and the messages to deliver. */
 export const review = (runs: Run[], text: string, now = Date.now()) => {
-	const got = parse(text), out: { run: Run; text?: string }[] = [];
+	const got = parse(text), out: { run: Run; text?: string; images?: string[] }[] = [];
 	for (const r of runs) {
 		const s = r.session && r.status === "open" ? got[bare(r.session)] : undefined;
 		if (!s) continue;
@@ -134,7 +179,8 @@ export const review = (runs: Run[], text: string, now = Date.now()) => {
 			...(j.notify && { notified: status + "/" + detail }), ...(j.flag && { flagged: true }) };
 		const note = j.notify ? message(next, j.notify + ", no callback", summary)
 			: j.flag ? message(next, "stuck", "Still " + status + "/" + detail + " after " + Math.round((now - r.started) / HOUR) + "h.") : undefined;
-		out.push({ run: next, text: note });
+		// A delivered note carries the images Devin uploaded since the last one.
+		out.push(note ? { run: { ...next, images: [] }, text: note, images: r.images ?? [] } : { run: next });
 	}
 	return out;
 };

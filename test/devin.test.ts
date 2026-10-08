@@ -40,3 +40,40 @@ ok(out[1].run.status === "open" && /blocked/.test(out[1].text!), "waiting_for_us
 ok(/stuck/.test(out[2].text!) && out[2].run.flagged, "stale -> flagged");
 const again = devin.review(out.map((o) => o.run), text);
 ok(again.every((o) => !o.text), "no repeat messages next hour");
+
+// Screenshot uploads: the shell helper's signature, checks, and delivery with the next message.
+const ir = ((await run(devin.add("img run", { channel: "imessage", to: "+1" }, "runimg", "devin-img"))) as any).right as devin.Run;
+const ci = devin.curl("https://x", ir);
+ok(/devin_image/.test(ci.prompt), "prompt carries devin_image helper");
+const fs = await import("node:fs");
+const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+fs.writeFileSync("/tmp/shot one.png", png);
+fs.writeFileSync("/tmp/shot.png", png);
+const ish = ci.image.replace("curl -sS", "printf '%s\\n'") + "\ndevin_image /tmp/shot.png";
+const il = execSync(ish, { shell: "/bin/bash" }).toString().split("\n");
+const its = il.find((l) => l.startsWith("x-raubot-ts: "))!.slice(13), isig = il.find((l) => l.startsWith("x-raubot-sig: "))!.slice(14);
+ok(il.some((l) => l.endsWith("/s/devin/runimg/image?name=shot.png")), "upload goes to /s/devin/<key>/image?name=");
+ok(((await run(devin.image("runimg", "shot.png", its, "0".repeat(64), png))) as any).left?.status === 401, "image: bad signature refused");
+ok(((await run(devin.image("runimg", "other.png", its, isig, png))) as any).left?.status === 401, "image: renamed file refused");
+ok(((await run(devin.image("runimg", "shot.png", its, isig, Uint8Array.from([...png, 9])))) as any).left?.status === 401, "image: altered bytes refused");
+const notimg = new TextEncoder().encode("hello");
+const nsig = await devin.sign(ir.secret, its + ".image.x.txt." + [...new Uint8Array(await crypto.subtle.digest("SHA-256", notimg))].map((x) => x.toString(16).padStart(2, "0")).join(""));
+ok(((await run(devin.image("runimg", "x.txt", its, nsig, notimg))) as any).left?.status === 415, "image: non-image refused");
+const ig = (await run(devin.image("runimg", "shot.png", its, isig, png))) as any;
+ok(ig._tag === "Right" && /^uploads\/devin\/img\/\d{4}-\d\d-\d\d\/[\w]+-shot\.png$/.test(ig.right.path), "image saved under uploads/devin/<session>/<date>/");
+ok(((await run(devin.image("runimg", "shot.png", its, isig, png))) as any).left?.status === 409, "image: replay refused");
+ok(devin.imageType(Uint8Array.from([0xff, 0xd8, 0xff, 0])) === "jpg" && devin.imageType(new TextEncoder().encode("GIF89a")) === "gif" && devin.imageType(new TextEncoder().encode("RIFF1234WEBPVP8 ")) === "webp", "jpg/gif/webp detected");
+// Callback delivers the held images and clears them.
+const csh = ci.curl.replace("curl -sS", "printf '%s\\n'") + "\ndevin_done done 'shipped'";
+const cl = execSync(csh, { shell: "/bin/bash" }).toString().split("\n");
+const cts = cl.find((l) => l.startsWith("x-raubot-ts: "))!.slice(13), csig = cl.find((l) => l.startsWith("x-raubot-sig: "))!.slice(14);
+const cb = (await run(devin.callback("runimg", "done", cts, csig, "shipped"))) as any;
+ok(cb._tag === "Right" && cb.right.images.length === 1 && cb.right.images[0] === ig.right.path, "callback carries uploaded images");
+ok((((await run(devin.get("runimg"))) as any).right.images ?? []).length === 0, "images cleared after delivery");
+// Safety net: a delivered note carries held images; a silent check keeps them.
+const sr = { ...b, images: ["uploads/devin/bbb/x.png"], notified: undefined } as devin.Run;
+const so = devin.review([sr], "Session devin-bbb:\n  status: running\n  status_detail: waiting_for_user\n");
+ok(so[0].text && so[0].images?.[0] === "uploads/devin/bbb/x.png" && (so[0].run.images ?? []).length === 0, "safety-net note carries images");
+const quiet = devin.review([{ ...sr, notified: "running/waiting_for_user" }], "Session devin-bbb:\n  status: running\n  status_detail: waiting_for_user\n");
+ok(!quiet[0].text && quiet[0].run.images?.length === 1, "silent check keeps images for later");
+
