@@ -19,7 +19,7 @@ export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Pro
 	const asset = (p: string) => env.ASSETS.fetch(new URL(p, url));
 	if (pathname === "/" || pathname === "/settings" || pathname === "/tree" || pathname.startsWith("/assets/") || pathname === "/favicon.png" || pathname === "/raubot-512.png" || pathname === "/raubot-mascot.png" || pathname === "/apple-touch-icon.png") return asset(pathname);
 	// Secret links skip Access, so their page loads its assets relative to /s/.
-	if (pathname.startsWith("/s/assets/")) return asset(pathname.slice(2));
+	if (pathname.startsWith("/s/assets/") || pathname === "/s/favicon.png" || pathname === "/s/apple-touch-icon.png") return asset(pathname.slice(2));
 	if (pathname.startsWith("/s/oidc/")) return oidc(req, env);
 	if (pathname === "/s/og.png") return new Response(og, { headers: { "content-type": "image/png", "cache-control": "public, max-age=86400" } });
 	// Access-gated (the Worker gate already checked): signs in, then back to a secret link so its form can save.

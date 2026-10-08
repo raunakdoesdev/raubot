@@ -53,7 +53,7 @@ assert.equal(await status(req("/box", { method: "POST", headers: { cookie: "a=b;
 assert.equal(await status(req("/box", { method: "POST", headers: { "cf-access-jwt-assertion": await mint({ ...base, exp: now - 3600 }) } })), 403, "expired -> 403");
 assert.equal(await status(req("/box", { method: "POST", headers: { "cf-access-jwt-assertion": await mint({ ...base, aud: ["x"] }) } })), 403, "wrong aud -> 403");
 const T = "/s/" + "a".repeat(32);
-for (const [m, p] of [["POST", "/imessage"], ["POST", "/s/devin/abcdef"], ["GET", "/s/oidc/.well-known/jwks.json"], ["POST", "/s/oidc/token"], ["GET", "/s/og.png"], ["GET", "/s/assets/x.js"], ["GET", T], ["GET", T + ".json"]] as const)
+for (const [m, p] of [["POST", "/imessage"], ["POST", "/s/devin/abcdef"], ["GET", "/s/oidc/.well-known/jwks.json"], ["POST", "/s/oidc/token"], ["GET", "/s/og.png"], ["GET", "/s/favicon.png"], ["GET", "/s/assets/x.js"], ["GET", T], ["GET", T + ".json"]] as const)
 	assert.equal(await status(req(p, { method: m })), 200, "exempt " + m + " " + p);
 for (const [m, p] of [["POST", T], ["DELETE", T], ["GET", "/imessage"], ["POST", "/s/og.png"], ["GET", "/s/other"], ["GET", "/s/" + "a".repeat(31)]] as const)
 	assert.equal(await status(req(p, { method: m })), 403, "not exempt " + m + " " + p);
