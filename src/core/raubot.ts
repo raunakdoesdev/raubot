@@ -38,6 +38,7 @@ import { OAuth } from "./oauth.ts";
 import { failedNote, redact, Secrets, SecretsLive } from "./secrets.ts";
 import { type TraceEvent, Tracer } from "./trace.ts";
 import * as cron from "./cron.ts";
+import * as web from "./search.ts";
 import * as devin from "./devin.ts";
 import * as hb from "./heartbeat.ts";
 
@@ -283,6 +284,18 @@ Example: find the Slack messages that need the user's attention.
 				inputSchema: Type.Object({ state: Type.Unknown(), questions: Type.Record(Type.String(), Type.Unknown()), model: Type.Optional(Type.String()) }),
 				execute: async ({ state, questions, model = "clef-flash" }: { state: unknown; questions: Record<string, unknown>; model?: string }) =>
 					JSON.stringify(await this.env.AI.run(`@cf/cloudflare/${model}` as keyof AiModels, { model, state, questions } as never)),
+			},
+			{
+				name: "web_search",
+				description: web.DESCRIPTION,
+				inputSchema: Type.Object({ query: Type.String(), max_results: Type.Optional(Type.Integer()) }),
+				execute: ({ query, max_results }: { query: string; max_results?: number }) => web.search(this.env.OPENROUTER_API_KEY, query, max_results),
+			},
+			{
+				name: "openrouter_web_search",
+				description: "Alias of web_search.",
+				inputSchema: Type.Object({ query: Type.String(), max_results: Type.Optional(Type.Integer()) }),
+				execute: ({ query, max_results }: { query: string; max_results?: number }) => web.search(this.env.OPENROUTER_API_KEY, query, max_results),
 			},
 			...executor.nested,
 		];
