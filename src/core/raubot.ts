@@ -98,6 +98,9 @@ export const markView = (mark: number) => (payload: unknown) => {
 /** OpenRouter: server-side web search, and Anthropic first so every request of raubot and its subagents shares one prompt cache. */
 const withSearch = (provider: string, p: AnthropicPayload) => (provider === "openrouter" ? { ...p, tools: [...(p.tools ?? []), WEB_SEARCH], provider: { order: ["anthropic"], allow_fallbacks: true } } : p);
 
+/** How long a browser call waits for a human to hand the desktop back before it gives up. */
+const PAUSE = 5 * 60_000;
+
 export class Raubot extends DurableObject<Env> implements Core {
 	memory!: Memory;
 	tracer!: Tracer;
@@ -414,7 +417,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				parameters: Type.Object({ code: Type.String({ description: "JavaScript, run as an async function body." }), timeout: Type.Optional(Type.Integer({ description: "Seconds, default 60, max 600." })) }),
 				execute: async ({ code, timeout }, api) => {
 					// A human took control of this desktop: wait for the hand back (their steer text arrives as a steer).
-					if (await ns.getByName(this.#boxOf(api.conversationId)).free()) return { content: [{ type: "text", text: "A human has control of the desktop and hasn't handed it back yet. Don't use the browser; wait or ask them." }], isError: true };
+					if (await ns.getByName(this.#boxOf(api.conversationId)).free(PAUSE)) return { content: [{ type: "text", text: "A human still has control of the desktop after a 5 minute wait. Don't use the browser; wait or ask them." }], isError: true };
 					const env = await fx(Effect.flatMap(Secrets, (s) => s.env()));
 					const main = ns.getByName("main");
 					const jar = (await main.jar()) as Jar;
