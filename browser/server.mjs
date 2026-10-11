@@ -129,7 +129,7 @@ const ops = {
 	version: async () => VERSION,
 };
 
-const VERSION = ["server.mjs", "launch.mjs", "vault.mjs", "passkeys.mjs"].map((f) => fs.statSync(new URL(f, import.meta.url)).mtimeMs).join(":");
+const VERSION = ["server.mjs", "launch.mjs", "vault.mjs", "passkeys.mjs", "origin.mjs"].map((f) => fs.statSync(new URL(f, import.meta.url)).mtimeMs).join(":");
 
 fs.rmSync(SOCK, { force: true });
 http.createServer(async (req, res) => {

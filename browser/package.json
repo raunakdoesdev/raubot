@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node passkeys.test.mjs && node origin.test.mjs && node launch.test.mjs"
+    "test": "node passkeys.test.mjs && node origin.test.mjs && node version.test.mjs && node launch.test.mjs"
   },
   "dependencies": {
     "@bitwarden/cli": "2026.9.1",
