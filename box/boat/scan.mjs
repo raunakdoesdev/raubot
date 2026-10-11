@@ -62,14 +62,14 @@ try {
 	// grep patterns are lines of text, so the binary forms are left to the raw scan.
 	const grepped = needles.filter((n) => !n.b.includes(0x0a) && !n.b.includes(0x00));
 	const t = Date.now();
-	const files = (await sh("sudo", ["grep", "-rlaF", "-f", "/dev/stdin", "--exclude-dir=proc", "--exclude-dir=sys", "--exclude-dir=dev", "--exclude-dir=run", "/", ...["/dev/shm/raubot-browser.log", "/run/log/journal"].filter((f) => fs.existsSync(f))], grepped.map((n) => n.b.toString()).join("\n") + "\n")).split("\n").filter(Boolean);
+	const files = (await sh("sudo", ["grep", "-rlaF", "-f", "-", "--exclude-dir=proc", "--exclude-dir=sys", "--exclude-dir=dev", "--exclude-dir=run", "/", ...["/dev/shm/raubot-browser.log", "/run/log/journal"].filter((f) => fs.existsSync(f))], grepped.map((n) => n.b.toString()).join("\n") + "\n")).split("\n").filter(Boolean);
 	report.files = { s: Math.round((Date.now() - t) / 1000), canaryFound: files.includes(CANARY), secretFiles: files.filter((f) => f !== CANARY) };
 	if (!report.files.canaryFound || report.files.secretFiles.length) fail = true;
 	if (!filesOnly) {
 		const dev = (await sh("findmnt", ["-no", "SOURCE", "/"])).trim();
 		const out = `/dev/shm/raubot-rawscan-${crypto.randomBytes(6).toString("hex")}.json`;
 		const t2 = Date.now();
-		await sh("sudo", ["python3", new URL("./test/rawscan.py", import.meta.url).pathname, dev, "/dev/stdin", out], needles.map((n) => n.b.toString("hex")).join("\n") + "\n");
+		await sh("sudo", ["python3", new URL("./test/rawscan.py", import.meta.url).pathname, dev, "-", out], needles.map((n) => n.b.toString("hex")).join("\n") + "\n");
 		const raw = JSON.parse(await sh("sudo", ["cat", out]));
 		await sh("sudo", ["rm", "-f", out]);
 		const hits = Object.entries(raw.hits).map(([i, c]) => [needles[Number(i)].name, c]);

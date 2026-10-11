@@ -1,8 +1,8 @@
-# Streams a block device and counts hits for needles read (hex, one per line) from a file. Writes {bytes, hits: {needle index: count}, offsets: {needle index: [first 8 byte offsets]}} as JSON.
+# Streams a block device and counts hits for needles read (hex, one per line) from a file, or from stdin if the file is "-". Writes {bytes, hits: {needle index: count}, offsets: {needle index: [first 8 byte offsets]}} as JSON.
 # Used by leaktest.mts for the raw-disk scan; grep can't do this, since a disk has few newlines and grep holds a whole "line" in memory.
 import json, os, sys
 dev, pat, out = sys.argv[1:4]
-needles = [bytes.fromhex(l) for l in open(pat).read().split()]
+needles = [bytes.fromhex(l) for l in (sys.stdin if pat == "-" else open(pat)).read().split()]
 tail, hits, offsets, size, n = b"", {}, {}, 0, max(map(len, needles))
 with open(dev, "rb", buffering=0) as f:
     while chunk := f.read(16 << 20):
