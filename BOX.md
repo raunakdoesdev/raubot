@@ -4,7 +4,7 @@
 
 ## What persists
 - `/workspace` is a git repo (Artifacts repo `workspace`). Every change is committed and pushed after each bash call, so any version can be restored with git. Files over 10 MB are git-ignored automatically.
-- Boat: the disk persists across stops (`/home/user`, `/workspace`, and installs under `/usr`, `/etc` and `/opt`). There is no replay. `~/.cache` and `/scratch` are not kept.
+- Boat: the disk persists across stops (`/home/user`, `/workspace`, and installs under `/usr`, `/etc` and `/opt`). `/workspace/setup.sh` runs only on a new sandbox, such as the first Boat boot of a box that was on Cloudflare. `~/.cache` and `/scratch` are not kept.
 - Cloudflare: the whole box is snapshotted when idle and restored on the next call. Snapshots can be lost (they expire after 30 days unused). Then the box starts fresh from git and runs `/workspace/setup.sh`.
 
 ## Rules

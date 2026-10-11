@@ -31,7 +31,8 @@ git -C raubot pull -q --ff-only 2>/dev/null || true
 (cd raubot && [ -d node_modules ] || npm ci --silent --no-audit --no-fund)
 mkdir -p /scratch
 (cd raubot/browser 2>/dev/null && { [ -d node_modules ] || npm i -s --no-audit --no-fund; } && ln -sf "$PWD/vault" /usr/local/bin/vault) || true
-[ -z "$FRESH" ] || [ ! -f setup.sh ] || bash setup.sh`;
+# A Boat box runs as a user with sudo; setup.sh was written for the root Cloudflare box.
+[ -z "$FRESH" ] || [ ! -f setup.sh ] || { [ "$(id -u)" = 0 ] || { apt-get() { sudo -E apt-get "$@"; }; apt() { sudo -E apt "$@"; }; export -f apt-get apt; }; bash setup.sh; }`;
 
 /** A Boat box's remotes carry no token: git gets it per command from GIT_CONFIG_* env, so it's never on the box's disk. */
 const gitAuth = (remotes: { url: string; token: string }[]) => Object.fromEntries([["GIT_CONFIG_COUNT", String(remotes.length)],
@@ -71,6 +72,7 @@ export class Computer extends DurableObject<Env> {
 	#waiters: (() => void)[] = [];
 	/** A Boat boot is under way (the container isn't running yet). */
 	#up = false;
+	#boatNew = false;
 
 	/** "agent-<id>" for a subagent's box, undefined for raubot's own. */
 	get #agent() { const n = this.ctx.id.name; return n && n !== "main" ? n : undefined; }
@@ -143,6 +145,7 @@ export class Computer extends DurableObject<Env> {
 				try {
 					this.#env = { ...base, WORKSPACE_REMOTE: ws.url, RAUBOT_REMOTE: rb.url, ...gitAuth([ws, rb]) };
 					this.#boat = await this.#boatUp(boat);
+					fresh = this.#boatNew;
 				} catch (e) {
 					console.log("box boat failed", JSON.stringify({ box: this.ctx.id.name, error: String(e) }));
 					await this.ctx.storage.put("boatDown", Date.now() + DOWN);
@@ -157,7 +160,7 @@ export class Computer extends DurableObject<Env> {
 				this.#up = false;
 			}
 			if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + TICK);
-			// On Boat installs persist on the disk, so setup.sh is only replayed for a fresh Cloudflare box.
+			// Installs persist on a Boat disk, so setup.sh is replayed only on a fresh box: a new Boat sandbox (e.g. the first boot after moving off Cloudflare) or a fresh Cloudflare box.
 			const r = await this.#run(SETUP, 900_000, fresh ? { FRESH: "1" } : {});
 			this.#note += r.exitCode ? `[box setup failed]\n${r.out}\n` : "";
 			if (this.#agent) this.#note += (await this.#serial(() => this.#run(SYNC, 120_000))).out;
@@ -193,6 +196,7 @@ export class Computer extends DurableObject<Env> {
 			await this.ctx.storage.put("boat", rec);
 			if (how === "install") { await boat.ready(id); await boat.bootstrap(id, TEMPLATE); }
 		}
+		this.#boatNew = how === "template" || how === "install";
 		const s = await boat.ready(rec.id);
 		if (!rec.url) await this.ctx.storage.put("boat", (rec = await daemon(boat, rec.id)));
 		await health(rec);

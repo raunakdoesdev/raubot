@@ -13,5 +13,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - run: npm ci --no-audit --no-fund
+      - run: test -n "$BOAT_API_KEY" || { echo "::error::The BOAT_API_KEY Actions secret is not set on this repo"; exit 1; }
+        env: { BOAT_API_KEY: "${{ secrets.BOAT_API_KEY }}" }
       - run: npm run boat:leaktest
         env: { BOAT_API_KEY: "${{ secrets.BOAT_API_KEY }}" }
