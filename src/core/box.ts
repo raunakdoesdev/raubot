@@ -196,6 +196,8 @@ export class Computer extends DurableObject<Env> {
 		const s = await boat.ready(rec.id);
 		if (!rec.url) await this.ctx.storage.put("boat", (rec = await daemon(boat, rec.id)));
 		await health(rec);
+		// Boat recreates its /swapfile on resume; swapped-out memory would put vault values on the root disk.
+		await run(rec, "sudo swapoff -a && sudo rm -f /swapfile", { ms: 30_000 });
 		await this.ctx.storage.put("saved", Date.now());
 		console.log("box boot", JSON.stringify({ box: this.ctx.id.name, backend: "boat", id: rec.id, how, zdr, state: s.state, ms: Date.now() - t }));
 		return rec;

@@ -238,6 +238,8 @@ return await page.textContent("#w");`);
 	try { await health(d, 20_000); report.daemonAfterResume = "same url"; } catch { d = await daemon(boat, id); await health(d); report.daemonAfterResume = "re-hosted"; }
 	report.resumeToDaemonS = secs(a);
 	report.swapAfterResume = await swap(d);
+	await sh(d, "sudo swapoff -a && sudo rm -f /swapfile");
+	check("swapOffAfterResume", (await swap(d)).includes("No such file"));
 	const rawScan = async () => {
 		// The raw root disk, deleted blocks included: every needle (text and binary). The scan runs detached; the needles reach it through tmpfs, which it deletes.
 		a = t();
