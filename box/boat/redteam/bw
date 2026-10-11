@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// The red-team fake vault: test/bw.cjs as an executable for BW_BIN.
+import "../test/bw.cjs";

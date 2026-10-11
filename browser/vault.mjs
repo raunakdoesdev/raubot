@@ -48,8 +48,8 @@ export async function find(env, words) {
 	}));
 }
 
-/** The value a ref points to. */
-export async function resolve(env, ref) {
+/** The item a ref points to and the field it names. */
+async function item(env, ref) {
 	const m = /^bw:\/\/([^/]+)(?:\/(.+))?$/.exec(ref);
 	if (!m) throw new Error(`bad ref ${ref}: use bw://<item>/<field>`);
 	const [, key, field = "password"] = m;
@@ -57,7 +57,15 @@ export async function resolve(env, ref) {
 	let hits = list.filter((i) => i.id === key || i.name === key);
 	if (!hits.length) hits = (list = await all(env, true)).filter((i) => i.id === key || i.name === key);
 	if (hits.length !== 1) throw new Error(`${ref}: ${hits.length ? "several items have that name, use its id" : "no such item"} (try vault find)`);
-	const i = hits[0];
+	return { i: hits[0], field };
+}
+
+/** The URIs the item a ref points to is saved for. */
+export const uris = async (env, ref) => ((await item(env, ref)).i.login?.uris ?? []).map((u) => u.uri).filter(Boolean);
+
+/** The value a ref points to. */
+export async function resolve(env, ref) {
+	const { i, field } = await item(env, ref);
 	const v = field === "totp" ? i.login?.totp && (await bw(["get", "totp", i.id])).trim()
 		: field === "uri" ? i.login?.uris?.[0]?.uri
 		: field === "notes" ? i.notes
@@ -66,6 +74,9 @@ export async function resolve(env, ref) {
 	if (!v) throw new Error(`${ref}: item has no ${field}`);
 	return v;
 }
+
+/** Every item in the vault, with its values (for scan.mjs, which looks for them on the disk). */
+export const logins = (env) => all(env);
 
 /** Every passkey in the vault, as stored (login.fido2Credentials). */
 export async function passkeys(env) {

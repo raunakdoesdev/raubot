@@ -21,7 +21,7 @@ const call = (op, body = {}) => new Promise((ok, fail) => {
 	req.end(JSON.stringify({ ...body, env }));
 });
 
-const version = () => ["server.mjs", "launch.mjs", "vault.mjs", "passkeys.mjs"].map((f) => fs.statSync(here(f)).mtimeMs).join(":");
+const version = () => ["server.mjs", "launch.mjs", "vault.mjs", "passkeys.mjs", "origin.mjs"].map((f) => fs.statSync(here(f)).mtimeMs).join(":");
 
 async function up() {
 	const v = await call("version").catch(() => undefined);

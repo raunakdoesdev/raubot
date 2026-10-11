@@ -4,6 +4,7 @@ import http from "node:http";
 import fs from "node:fs";
 import * as vault from "./vault.mjs";
 import { attach } from "./passkeys.mjs";
+import { fillUrls, refuse, sameSite, typeUrls } from "./origin.mjs";
 import { launch } from "./launch.mjs";
 
 export const SOCK = "/tmp/raubot-browser.sock";
@@ -95,8 +96,8 @@ async function run({ code, timeout = 60, jar }) {
 	const target = (t) => (typeof t === "string" ? page.locator(t) : t);
 	const v = {
 		find: (...words) => vault.find(env, words.flat()),
-		fill: async (t, ref) => target(t).fill(remember(ref, await vault.resolve(env, ref))),
-		type: async (ref, opts) => page.keyboard.type(remember(ref, await vault.resolve(env, ref)), { delay: 40, ...opts }),
+		fill: async (t, ref) => { const l = target(t), u = await vault.uris(env, ref), at = await fillUrls(page, l); if (!sameSite(at, u)) throw refuse(ref, at, u); return l.fill(remember(ref, await vault.resolve(env, ref))); },
+		type: async (ref, opts) => { const u = await vault.uris(env, ref), at = await typeUrls(page); if (!sameSite(at, u)) throw refuse(ref, at, u); return page.keyboard.type(remember(ref, await vault.resolve(env, ref)), { delay: 40, ...opts }); },
 		sync: async () => { vault.refresh(); await loadKeys(); return `${keys?.length ?? 0} passkeys loaded`; },
 	};
 	const fn = new (Object.getPrototypeOf(async () => {}).constructor)("page", "context", "state", "vault", "screenshot", "console", "sleep", code);
