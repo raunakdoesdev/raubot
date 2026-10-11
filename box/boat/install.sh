@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run as root on a clean Boat sandbox by build.mjs, with this directory copied to /home/user/.raubot-template.
+# Run as root on a clean Boat sandbox by build.ts, with this directory copied to /home/user/.raubot-template.
 set -euo pipefail
 cd "$(dirname "$0")"
 export DEBIAN_FRONTEND=noninteractive

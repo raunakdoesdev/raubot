@@ -1,5 +1,5 @@
 {
-	"$comment": "The Boat template for a fresh raubot box. build.mjs installs this on a clean sandbox and saves it as the named snapshot raubot-box-<hash>; set BOAT_TEMPLATE to that name.",
+	"$comment": "The Boat template for a fresh raubot box. build.ts installs this on a clean sandbox and saves it as the named snapshot raubot-box-<hash>; set BOAT_TEMPLATE to that name.",
 	"apt": ["git", "ca-certificates", "curl", "jq", "ripgrep", "iptables", "wireguard-tools", "python3", "build-essential"],
 	"egress": {
 		"$comment": "Default deny. Allowed: loopback, replies, Boat's WireGuard endpoint and agent port 8911, the system resolvers, then these ports. deny wins over the port list.",

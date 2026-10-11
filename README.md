@@ -37,6 +37,6 @@ npm install
 echo "OPENAI_API_KEY=sk-..." > .dev.vars
 npm run dev       # http://localhost:8787
 npm run deploy    # raubot.reducto.ai, behind Cloudflare Access
-BOAT_API_KEY=... npm run boat:template    # build the Boat template; put the printed name in BOAT_TEMPLATE
+npm run boat:template    # needs BOAT_API_KEY in env; builds the Boat template and prints the name for BOAT_TEMPLATE
 npm run deploy:staging    # raubot-staging.reducto.ai: separate chat, box and Artifacts namespace `raubot-staging`; test here, not on the main instance
 ```
