@@ -1,3 +1,7 @@
 #!/usr/bin/env node
-// The red-team fake vault: test/bw.cjs as an executable for BW_BIN.
-import "../test/bw.cjs";
+// The red-team fake vault: test/bw.cjs as an executable for BW_BIN. It swaps in fake account values, so the real BW_* secrets never reach the fake.
+const e = process.env;
+e.BW_CLIENTID = "user.redteam";
+e.BW_CLIENTSECRET = "redteam";
+if (e.BW_PASSWORD) e.BW_PASSWORD = e.BW_FAKE_PASSWORD;
+await import("../test/bw.cjs");
