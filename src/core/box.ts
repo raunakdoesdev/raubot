@@ -28,9 +28,9 @@ grep -qx raubot/ .gitignore 2>/dev/null || { printf 'raubot/\nnode_modules/\n' >
 [ -d raubot/.git ] || git clone -q "$RAUBOT_REMOTE" raubot
 git -C raubot remote set-url origin "$RAUBOT_REMOTE"
 git -C raubot pull -q --ff-only 2>/dev/null || true
-(cd raubot && [ -d node_modules ] || npm ci --silent --no-audit --no-fund)
+(cd raubot && [ node_modules/.package-lock.json -nt package-lock.json ] || npm ci --silent --no-audit --no-fund)
 mkdir -p /scratch
-(cd raubot/browser 2>/dev/null && { [ -d node_modules ] || npm i -s --no-audit --no-fund; } && ln -sf "$PWD/vault" /usr/local/bin/vault) || true
+(cd raubot/browser 2>/dev/null && { [ node_modules/.package-lock.json -nt package-lock.json ] || npm i -s --no-audit --no-fund; } && ln -sf "$PWD/vault" /usr/local/bin/vault) || true
 # A Boat box runs as a user with sudo; setup.sh was written for the root Cloudflare box.
 [ -z "$FRESH" ] || [ ! -f setup.sh ] || { [ "$(id -u)" = 0 ] || { apt-get() { sudo -E apt-get "$@"; }; apt() { sudo -E apt "$@"; }; export -f apt-get apt; }; bash setup.sh; }`;
 

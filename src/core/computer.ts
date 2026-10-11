@@ -3,7 +3,7 @@ import { Effect } from "effect";
 import { Box } from "./fx.ts";
 
 /** Fetch browser/ from raubot main, install its packages and Chromium once (kept by snapshots), then run. Install noise goes to stderr. */
-const ENSURE = `flock /tmp/browser.lock sh -c 'git -C raubot fetch -q && git -C raubot checkout -q origin/main -- browser && cd raubot/browser && { [ -d node_modules ] || npm i -s --no-audit --no-fund; } && ln -sf "$PWD/vault" /usr/local/bin/vault && { [ -f ~/.raubot/chromium ] || { npx playwright install --with-deps chromium && mkdir -p ~/.raubot && touch ~/.raubot/chromium; }; }' >&2`;
+const ENSURE = `flock /tmp/browser.lock sh -c 'git -C raubot fetch -q && git -C raubot checkout -q origin/main -- browser && cd raubot/browser && { [ node_modules/.package-lock.json -nt package-lock.json ] || npm i -s --no-audit --no-fund; } && ln -sf "$PWD/vault" /usr/local/bin/vault && { [ -f ~/.raubot/chromium ] || { npx playwright install --with-deps chromium && mkdir -p ~/.raubot && touch ~/.raubot/chromium; }; }' >&2`;
 
 export type Jar = Record<string, unknown[]>;
 export type Shot = { out: string; error?: boolean; images: string[]; tabs: string; changed?: Jar };
