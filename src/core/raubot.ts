@@ -41,6 +41,7 @@ import * as cron from "./cron.ts";
 import * as web from "./search.ts";
 import * as devin from "./devin.ts";
 import * as hb from "./heartbeat.ts";
+import { finals } from "./replies.ts";
 
 type Env = { SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
 
@@ -50,6 +51,8 @@ type DevinArgs = { add?: { purpose: string; key?: string; session?: string }; li
 type HeartbeatArgs = { every?: string; activeHours?: { start: string; end: string; tz?: string }; ackMaxChars?: number; target?: "last" | "app" | "imessage"; pause?: boolean; run?: boolean };
 /** Buffered log line of a heartbeat turn, kept out of the log until the turn ends. */
 type Held = { kind: Msg["kind"]; text: string; date: number };
+/** The channel a turn's replies go to: `start` is the log index of its first message, `sent` the last reply delivered. */
+type Reply = Origin & { start: number; sent?: number };
 /** The heartbeat turn in flight: when it started, its due tasks and the digest cursor to commit if it succeeds. */
 type Beat = { at: number; tasks: string[]; cursor?: unknown };
 /** Messages from raubot's own machinery, not the user. */
@@ -104,6 +107,7 @@ export class Raubot extends DurableObject<Env> implements Core {
 	#partial = "";
 	#steering = "[]";
 	#delivering = false;
+	#redeliver = false;
 	#marks = -1;
 	#compact: { system: string; tools: { name: string; description: string; parameters: never }[] } | undefined;
 	#prompt = "";
@@ -563,20 +567,27 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		};
 	}
 
-	/** Once the turn ends, its final reply goes back to the channel that started it. Stored, so a restart mid-turn still delivers. */
+	/** Final replies go back to the channel that started the turn: every reply the model finished before a newer message joined the turn, then the turn's last one. Stored, so a restart mid-turn still delivers; `sent` keeps them in order and never twice. */
 	async #deliver() {
-		const r = await this.ctx.storage.get<Origin & { start: number }>("reply");
-		const said = r && !this.busy() && this.memory.log.slice(r.start).filter((m) => m.kind === "talk").at(-1)?.text;
-		const reply = said && !cron.SILENT.test(said) ? hb.scrub(said) || undefined : undefined;
-		if (r && !reply && !this.busy() && this.memory.log.length > r.start + 1) { // ended silent
-			await this.ctx.storage.delete("reply");
-			await this.#fx(idle(this.#channels, r));
-		}
-		if (!r || !reply || this.#delivering) return;
+		if (this.#delivering) return void (this.#redeliver = true);
 		this.#delivering = true;
 		try {
-			await this.ctx.storage.delete("reply");
-			await this.#fx(deliver(this.#channels, r, reply));
+			do {
+				this.#redeliver = false;
+				const r = await this.ctx.storage.get<Reply>("reply");
+				if (!r) return;
+				const busy = this.busy();
+				const replies = finals(this.memory.log, r.start, r.sent ?? -1, !busy);
+				for (const { at, text: said } of replies) {
+					const reply = !cron.SILENT.test(said) ? hb.scrub(said) || undefined : undefined;
+					await this.ctx.storage.put("reply", { ...r, sent: at }); // at most once, even across a restart
+					if (reply) await this.#fx(deliver(this.#channels, r, reply)).catch((e) => console.error("deliver", e));
+				}
+				if (!busy && (replies.length || this.memory.log.length > r.start + 1)) {
+					await this.ctx.storage.delete("reply");
+					if (!replies.length) await this.#fx(idle(this.#channels, r)); // ended silent (or already sent)
+				}
+			} while (this.#redeliver);
 		} finally { this.#delivering = false; }
 	}
 
@@ -745,7 +756,10 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		if (!MACHINE.test(input)) await this.ctx.storage.put("last-from", from);
 		input = tag(from, [input, ...files.map((f) => `[attached: ${f}]`)].filter(Boolean).join("\n"));
 		if (from.channel !== APP.channel) {
-			await this.ctx.storage.put({ reply: { ...from, start: this.memory.log.length }, [`origin:${from.channel}`]: from });
+			// A message joining a turn keeps the earliest start, so replies to earlier messages in it still go out.
+			const prev = (this.busy() || (await this.#queued()).length) ? await this.ctx.storage.get<Reply>("reply") : undefined;
+			const reply: Reply = prev ? { ...from, start: prev.start, ...(prev.sent !== undefined && { sent: prev.sent }) } : { ...from, start: this.memory.log.length };
+			await this.ctx.storage.put({ reply, [`origin:${from.channel}`]: from });
 		}
 		if (this.busy()) return void (await this.root.submit({ type: "input", content: input, whenBusy: "steer" }, C));
 		const queued = [...await this.#queued(), input];
