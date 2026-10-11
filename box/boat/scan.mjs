@@ -12,7 +12,7 @@ import { logins, passkeys, ready } from "../../browser/vault.mjs";
 import { rawId } from "../../browser/passkeys.mjs";
 
 const filesOnly = process.argv.includes("--files-only");
-const env = Object.fromEntries(["BW_CLIENTID", "BW_CLIENTSECRET", "BW_PASSWORD"].map((k) => [k, process.env[k]]));
+const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("BW_")));
 for (const k of Object.keys(env)) delete process.env[k];
 if (!ready(env)) throw new Error("BW_CLIENTID, BW_CLIENTSECRET and BW_PASSWORD must be in this command's env");
 
@@ -21,7 +21,8 @@ const add = (name, b) => { if (b.length >= 12) needles.push({ name, b }); };
 const text = (name, s) => {
 	for (const f of new Set([s, Buffer.from(s).toString("base64").replace(/=+$/, ""), Buffer.from(s).toString("base64url"), encodeURIComponent(s)])) add(name, Buffer.from(f));
 };
-for (const [k, v] of Object.entries(env)) text(k, v);
+// BW_BIN is a path and BW_FAKE_ITEMS is covered item by item below.
+for (const [k, v] of Object.entries(env)) if (!["BW_BIN", "BW_FAKE_ITEMS"].includes(k)) text(k, v);
 for (const i of await logins(env)) for (const [f, v] of [["username", i.login?.username], ["password", i.login?.password], ["totp seed", i.login?.totp], ["notes", i.notes], ...(i.fields ?? []).map((x) => [x.name, x.value])]) if (v && v.length >= 8) text(`item ${i.name} ${f}`, v);
 for (const p of await passkeys(env)) {
 	const who = `passkey ${p.rpId}${p.userName ? ` ${p.userName}` : ""}`;
