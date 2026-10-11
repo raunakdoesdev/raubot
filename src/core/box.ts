@@ -1,8 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { CAP } from "./prompts.ts";
-import { Boat, BoatError, daemon, health, run, screen, type Daemon } from "./boat.ts";
+import { Boat, BoatError, daemon, health, prestop, run, screen, type Daemon } from "./boat.ts";
+import { TEMPLATE } from "./boat-template.ts";
 
-type Env = { BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; CF_DEPLOY_TOKEN: string; SPECTRUM_PROJECT_ID: string; SPECTRUM_PROJECT_SECRET: string; OIDC_MINT_KEY?: string; PUBLIC_URL?: string; BOX_BACKEND?: string; BOAT_API_KEY?: string; BOAT_TEMPLATE?: string };
+type Env = { BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; CF_DEPLOY_TOKEN: string; SPECTRUM_PROJECT_ID: string; SPECTRUM_PROJECT_SECRET: string; OIDC_MINT_KEY?: string; PUBLIC_URL?: string; BOX_BACKEND?: string; BOAT_API_KEY?: string; BOAT_TEMPLATE?: string; BOAT_WIPE_BROWSER_ON_STOP?: string };
 
 const ACCOUNT = "fadf1a80d9469afc81af5899893cd853";
 
@@ -166,21 +167,37 @@ export class Computer extends DurableObject<Env> {
 	/** Starts (or resumes, or forks for a subagent) this box's Boat sandbox and connects to its daemon. */
 	async #boatUp(boat: Boat) {
 		const t = Date.now();
+		const zdr = await boat.zdr();
+		await this.ctx.storage.put("zdr", zdr);
 		let rec = await this.ctx.storage.get<Daemon>("boat");
-		if (rec && !(await boat.get(rec.id))) rec = undefined;
-		const made = !rec;
+		if (rec) {
+			const s = await boat.get(rec.id);
+			// With zero data retention a stop erases the sandbox, so an archived one can't come back.
+			const erased = !!s && zdr && ["archiving", "archived"].includes(s.state);
+			if (erased) await boat.remove(rec.id).catch(() => {});
+			if (!s || erased) { rec = undefined; await this.ctx.storage.delete("boat"); }
+		}
+		let how = rec ? "resume" : "fork";
 		if (!rec) {
 			// A subagent's box is a fork of raubot's (with no Boat credentials either); raubot's starts from the template.
 			const from = this.#agent ? await (this.env.BOX.getByName("main") as unknown as { boatId(): Promise<string | undefined> }).boatId() : undefined;
 			if (this.#agent && !from) throw new BoatError("raubot's box isn't on Boat");
-			rec = { id: from ? await boat.fork(from) : await boat.create(this.env.BOAT_TEMPLATE), url: "", token: "" };
+			// Boat forks from the latest disk snapshot. A sandbox that just started has none yet, so then the subagent starts clean.
+			let id = from ? await boat.fork(from).catch((e) => { if (e instanceof BoatError && e.code === "fork_failed") return undefined; throw e; }) : undefined;
+			if (!id) {
+				how = this.env.BOAT_TEMPLATE ? "template" : "install";
+				// raubot's box doesn't auto-stop when a stop would erase it.
+				id = await boat.create(this.env.BOAT_TEMPLATE || undefined, !this.#agent && zdr);
+			}
+			rec = { id, url: "", token: "" };
 			await this.ctx.storage.put("boat", rec);
+			if (how === "install") { await boat.ready(id); await boat.bootstrap(id, TEMPLATE); }
 		}
 		const s = await boat.ready(rec.id);
 		if (!rec.url) await this.ctx.storage.put("boat", (rec = await daemon(boat, rec.id)));
 		await health(rec);
 		await this.ctx.storage.put("saved", Date.now());
-		console.log("box boot", JSON.stringify({ box: this.ctx.id.name, backend: "boat", id: rec.id, made, fork: made && !!this.#agent, state: s.state, ms: Date.now() - t }));
+		console.log("box boot", JSON.stringify({ box: this.ctx.id.name, backend: "boat", id: rec.id, how, zdr, state: s.state, ms: Date.now() - t }));
 		return rec;
 	}
 
@@ -303,7 +320,7 @@ export class Computer extends DurableObject<Env> {
 	/** Stops the Boat sandbox (Boat snapshots its disk; a stopped sandbox costs nothing). */
 	async #boatStop() {
 		const rec = await this.ctx.storage.get<Daemon>("boat");
-		if (this.#boat) await this.#run(WIPE, 60_000).catch(() => {});
+		if (this.#boat) await this.#run(prestop(this.env.BOAT_WIPE_BROWSER_ON_STOP === "1"), 60_000).catch(() => {});
 		this.#lost();
 		if (rec && this.env.BOAT_API_KEY) await new Boat(this.env.BOAT_API_KEY).stop(rec.id).catch((e) => console.log("box boat stop", String(e)));
 		await this.ctx.storage.put("saved", Date.now());
@@ -398,6 +415,8 @@ export class Computer extends DurableObject<Env> {
 		// Boat snapshots the disk every minute by itself; raubot only stops the sandbox when it's idle.
 		if (!c.running && (await this.ctx.storage.get("boat"))) {
 			if (this.#busy || now - last <= IDLE || (await this.#held())) return this.ctx.storage.setAlarm(now + TICK);
+			// With zero data retention a stop erases the disk: raubot's box keeps running, and an idle subagent box is deleted (its work is pushed).
+			if (await this.ctx.storage.get("zdr")) return this.#agent ? this.#drop() : undefined;
 			if ((await this.ctx.storage.get<number>("saved") ?? 0) < last || this.#boat) await this.#boatStop();
 			return;
 		}

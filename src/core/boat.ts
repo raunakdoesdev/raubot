@@ -4,6 +4,13 @@
 const API = "https://boat.dev/api/v1";
 export const DAEMON_PORT = 8912;
 
+/** Run in the box before Boat stops (and snapshots) it: Chrome flushes its profile and quits, the Bitwarden tmpfs and /scratch are emptied.
+ * `wipeBrowser` also deletes the Chrome profile (BOAT_WIPE_BROWSER_ON_STOP), so no cookies or local storage are in the snapshot. */
+export const prestop = (wipeBrowser = false) => `curl -s -m 10 --unix-socket /tmp/raubot-browser.sock -X POST -d '{}' http://box/quit >/dev/null
+for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -f '[b]rowser/server.mjs' >/dev/null || break; sleep 1; done
+pkill -TERM -f '[b]rowser/server.mjs'; pkill -TERM -x chrome; pkill -TERM -x chromium; sleep 1; pkill -KILL -x chrome; pkill -KILL -x chromium
+rm -rf /dev/shm/raubot-bw /dev/shm/raubot-chrome /dev/shm/raubot-browser.log /scratch/* /scratch/.[!.]*${wipeBrowser ? " ~/.raubot/browser" : ""}; true`;
+
 export class BoatError extends Error {
 	constructor(message: string, readonly status?: number, readonly code?: string) { super(message); }
 }
@@ -23,9 +30,15 @@ export class Boat {
 
 	async #call<T = Json>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
 		let r: Response;
-		try {
-			r = await fetch(`${API}${path}`, { method, headers: { authorization: `Bearer ${this.key}`, "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
-		} catch (e) { throw new BoatError(`boat ${method} ${path}: ${e instanceof Error ? e.message : String(e)}`); }
+		// Boat allows 12 sandbox starts (create/fork/resume) per minute; wait out a 429 instead of falling back to CF.
+		for (let i = 0; ; i++) {
+			try {
+				r = await fetch(`${API}${path}`, { method, headers: { authorization: `Bearer ${this.key}`, "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
+			} catch (e) { throw new BoatError(`boat ${method} ${path}: ${e instanceof Error ? e.message : String(e)}`); }
+			if (r.status !== 429 || i === 6) break;
+			await r.body?.cancel();
+			await sleep(Math.min(Number(r.headers.get("retry-after")) || 5 * (i + 1), 20) * 1000);
+		}
 		const j = (await r.json().catch(() => ({}))) as Json & { error?: { code?: string; message?: string } };
 		if (!r.ok || j.ok === false) {
 			const code = (j.code ?? j.error?.code) as string | undefined;
@@ -35,8 +48,8 @@ export class Boat {
 	}
 
 	/** A new sandbox from the named snapshot `from` (or Boat's base image). Fails fast when Boat has no ready machine. */
-	async create(from?: string) {
-		const r = await this.#call<{ sandbox: Sandbox }>("POST", "/sandboxes", { ...SAFE, ttlSeconds: TTL, failFast: true, ...(from ? { from } : {}) }, { "idempotency-key": crypto.randomUUID() });
+	async create(from?: string, keep = false) {
+		const r = await this.#call<{ sandbox: Sandbox }>("POST", "/sandboxes", { ...SAFE, ttlSeconds: keep ? null : TTL, failFast: true, ...(from ? { from } : {}) }, { "idempotency-key": crypto.randomUUID() });
 		return r.sandbox.id;
 	}
 
@@ -86,6 +99,16 @@ export class Boat {
 		throw new BoatError(`boat desktop ${id}: still provisioning after 30s`);
 	}
 
+	/** True when the account has zero data retention: a stop erases the sandbox, and there are no named snapshots. */
+	async zdr() { return (await this.#call<{ enabled?: boolean }>("GET", "/account/data-retention")).enabled === true; }
+
+	/** Installs the template (box/boat) on a clean sandbox: what the named snapshot holds, for when there is none. No secrets in it. */
+	async bootstrap(id: string, files: Record<string, string>) {
+		await Promise.all(Object.entries(files).map(([f, s]) => this.file(id, `.raubot-template/${f}`, s)));
+		const r = await this.command(id, "sudo bash .raubot-template/install.sh; e=$?; rm -rf .raubot-template; exit $e", 600);
+		if (r.exitCode) throw new BoatError(`boat template install exited ${r.exitCode}: ${r.out.slice(-500)}`);
+	}
+
 	/** Writes a file under /home/user (or /tmp). */
 	file(id: string, path: string, content: string) { return this.#call("PUT", `/sandboxes/${id}/files`, { path, content, encoding: "utf8" }); }
 
@@ -110,14 +133,36 @@ export async function daemon(boat: Boat, id: string): Promise<Daemon> {
 	return { id, url, token };
 }
 
-const at = (d: Daemon, path: string) => { const u = new URL(d.url); u.pathname = path; return u.toString(); };
+const at = (d: Daemon, path: string) => { const u = new URL(d.url); u.pathname = path; u.search = ""; return u.toString(); };
+
+// Boat's proxy takes the private URL's `_token` once, answers with a cookie and a 302 to the bare path, and wants that cookie after.
+const cookies = new Map<string, Promise<string>>();
+function cookie(d: Daemon, fresh: boolean) {
+	let c = cookies.get(d.url);
+	if (!c || fresh) {
+		const u = new URL(d.url);
+		u.pathname = "/health";
+		c = fetch(u, { redirect: "manual", signal: AbortSignal.timeout(10_000) }).then((r) => r.headers.getSetCookie().map((v) => v.split(";")[0]).join("; "));
+		c.catch(() => cookies.delete(d.url));
+		cookies.set(d.url, c);
+	}
+	return c;
+}
+
+/** A request to the daemon, getting a new proxy cookie once if the old one is refused. */
+async function call(d: Daemon, path: string, init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal } = {}) {
+	for (let i = 0; ; i++) {
+		const r = await fetch(at(d, path), { ...init, redirect: "manual", headers: { ...init.headers, cookie: await cookie(d, i > 0) } });
+		if (i || ![301, 302, 303, 307, 401, 403].includes(r.status)) return r;
+	}
+}
 
 /** Runs `cmd` in the sandbox through its daemon. Throws BoatError when the daemon can't be reached. */
 export async function run(d: Daemon, cmd: string, o: { ms: number; env?: Record<string, string>; stdin?: string | Uint8Array; split?: boolean }) {
 	const stdin = typeof o.stdin === "string" || o.stdin === undefined ? { stdin: o.stdin ?? "" } : { stdin64: b64(o.stdin) };
 	let r: Response;
 	try {
-		r = await fetch(at(d, "/exec"), {
+		r = await call(d, "/exec", {
 			method: "POST", headers: { "content-type": "application/json", "x-raubot-token": d.token },
 			body: JSON.stringify({ cmd, env: o.env ?? {}, timeout: o.ms / 1000, split: o.split ?? false, ...stdin }),
 			signal: AbortSignal.timeout(o.ms + 30_000),
@@ -132,14 +177,14 @@ export async function run(d: Daemon, cmd: string, o: { ms: number; env?: Record<
 export async function health(d: Daemon, ms = 60_000) {
 	const end = Date.now() + ms;
 	for (;; await sleep(1000)) {
-		const r = await fetch(at(d, "/health"), { signal: AbortSignal.timeout(10_000) }).catch(() => undefined);
+		const r = await call(d, "/health", { signal: AbortSignal.timeout(10_000) }).catch(() => undefined);
 		if (r?.status === 200) return;
 		if (Date.now() > end) throw new BoatError(`box daemon not healthy after ${ms / 1000}s (${r?.status ?? "no answer"})`);
 	}
 }
 
 export async function screen(d: Daemon) {
-	const r = await fetch(at(d, "/screen"), { headers: { "x-raubot-token": d.token }, signal: AbortSignal.timeout(15_000) }).catch(() => undefined);
+	const r = await call(d, "/screen", { headers: { "x-raubot-token": d.token }, signal: AbortSignal.timeout(15_000) }).catch(() => undefined);
 	return r?.status === 200 ? { jpeg: new Uint8Array(await r.arrayBuffer()), url: r.headers.get("x-url") ?? "" } : undefined;
 }
 

@@ -10,6 +10,7 @@
 ## Rules
 - When you install something you want to keep, also append the command to `/workspace/setup.sh`. The Cloudflare fallback needs it.
 - Never write secrets to disk. They come in each command's env.
+- On Boat, vault values (passwords, TOTP, API keys) exist only at use time: in the browser's memory, in `vault run`'s child env, and Bitwarden's cache on tmpfs (`/dev/shm`). Never echo them into files, logs or scripts. Chrome's password manager and autofill are off, the journal is in memory, and shells keep no history. Logged-in browser state (cookies, local storage) does persist on the disk; `BOAT_WIPE_BROWSER_ON_STOP=1` deletes the Chrome profile before each stop.
 - Put big throwaway files (downloads, intermediate data) in `/scratch`. It is never committed and is emptied when the box stops.
 - Never change `box/Dockerfile`: a new image can't restore old snapshots. Install in the box instead.
 

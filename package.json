@@ -7,6 +7,7 @@
     "deploy:staging": "wrangler deploy --env staging",
     "check": "tsc -p .",
     "boat:template": "tsx box/boat/build.ts",
+    "boat:leaktest": "tsx box/boat/leaktest.mts",
     "test": "tsx test/search.test.ts && tsx test/heartbeat.test.ts && tsx test/cron.test.ts && tsx test/devin.test.ts && tsx test/oidc.test.ts && tsx test/access.test.ts && tsx test/memory.test.ts && tsx test/replies.test.ts && tsx test/voice.test.ts"
   },
   "keywords": [],

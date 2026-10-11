@@ -46,7 +46,7 @@ http.createServer(async (req, res) => {
 		if (!want || req.headers["x-raubot-token"] !== want) return json(401, { error: "unauthorized" });
 		if (req.method === "POST" && req.url === "/exec") return json(200, await run(JSON.parse((await body(req)).toString())));
 		if (req.url === "/screen") {
-			const r = await fetch("http://127.0.0.1:8090/screen").catch(() => undefined);
+			const r = await fetch("http://127.0.0.1:8913/screen").catch(() => undefined);
 			if (r?.status !== 200) return json(204, {});
 			res.writeHead(200, { "content-type": "image/jpeg", "x-url": r.headers.get("x-url") ?? "" });
 			return res.end(Buffer.from(await r.arrayBuffer()));

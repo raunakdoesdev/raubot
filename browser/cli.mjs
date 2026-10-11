@@ -6,6 +6,8 @@ import { spawn } from "node:child_process";
 
 const SOCK = "/tmp/raubot-browser.sock";
 const here = (f) => new URL(f, import.meta.url).pathname;
+// On a Boat box the log is on tmpfs (RAUBOT_LOG), off the disk.
+const LOG = process.env.RAUBOT_LOG ?? `${process.env.HOME}/.raubot/browser.log`;
 const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("BW_")));
 
 const call = (op, body = {}) => new Promise((ok, fail) => {
@@ -26,13 +28,13 @@ async function up() {
 	if (v === version()) return;
 	if (v) { await call("quit").catch(() => {}); await new Promise((r) => setTimeout(r, 500)); }
 	fs.mkdirSync(`${process.env.HOME}/.raubot`, { recursive: true });
-	const log = fs.openSync(`${process.env.HOME}/.raubot/browser.log`, "a");
+	const log = fs.openSync(LOG, "a");
 	spawn(process.execPath, [here("server.mjs")], { detached: true, stdio: ["ignore", log, log] }).unref();
 	for (let i = 0; i < 100; i++) {
 		if ((await call("version").catch(() => undefined)) === version()) return;
 		await new Promise((r) => setTimeout(r, 300));
 	}
-	throw new Error(`browser server didn't start: ${fs.readFileSync(`${process.env.HOME}/.raubot/browser.log`, "utf8").slice(-1500)}`);
+	throw new Error(`browser server didn't start: ${fs.readFileSync(LOG, "utf8").slice(-1500)}`);
 }
 
 const [cmd, sub, ...rest] = process.argv.slice(2);

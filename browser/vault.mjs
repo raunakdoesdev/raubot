@@ -7,9 +7,12 @@ const run = promisify(execFile);
 const BW = process.env.BW_BIN ?? new URL("./node_modules/.bin/bw", import.meta.url).pathname;
 const NEED = ["BW_CLIENTID", "BW_CLIENTSECRET", "BW_PASSWORD"];
 
+// On a Boat box this is tmpfs (RAUBOT_BW_DIR=/dev/shm/raubot-bw), so Bitwarden's login and cache never reach the disk or its snapshots.
+const DATA = process.env.RAUBOT_BW_DIR ?? `${process.env.HOME}/.raubot/bw`;
+
 let session, items, synced = 0;
 
-const bw = async (args, env = {}) => (await run(BW, args, { env: { ...process.env, BITWARDENCLI_APPDATA_DIR: process.env.RAUBOT_BW_DIR ?? `${process.env.HOME}/.raubot/bw`, BW_NOINTERACTION: "true", ...(session ? { BW_SESSION: session } : {}), ...env }, maxBuffer: 256 << 20 })).stdout;
+const bw = async (args, env = {}) => (await run(BW, args, { env: { ...process.env, BITWARDENCLI_APPDATA_DIR: DATA, BW_NOINTERACTION: "true", ...(session ? { BW_SESSION: session } : {}), ...env }, maxBuffer: 256 << 20 })).stdout;
 
 async function unlock(env) {
 	if (session) return;
@@ -81,11 +84,14 @@ export async function counted(env, credentialId, count) {
 
 // `bw edit item <id>` reads the encoded item from stdin, keeping it out of argv.
 const edit = (id, encoded) => new Promise((ok, fail) => {
-	const p = execFile(BW, ["edit", "item", id], { env: { ...process.env, BITWARDENCLI_APPDATA_DIR: `${process.env.HOME}/.raubot/bw`, BW_NOINTERACTION: "true", BW_SESSION: session } }, (e) => (e ? fail(e) : ok()));
+	const p = execFile(BW, ["edit", "item", id], { env: { ...process.env, BITWARDENCLI_APPDATA_DIR: DATA, BW_NOINTERACTION: "true", BW_SESSION: session } }, (e) => (e ? fail(e) : ok()));
 	p.stdin.end(encoded);
 });
 
 /** Forget the cached items so the next use syncs. */
 export const refresh = () => { items = undefined; };
+
+/** Drops the decrypted items from memory (after a browser run). */
+export const forget = () => { items = undefined; };
 
 export const ready = (env) => NEED.every((k) => env[k]);

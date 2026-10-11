@@ -15,6 +15,18 @@ chown user:user /usr/local/bin
 # The browser uses the preinstalled Chrome on the real desktop, so Playwright's Chromium download is skipped.
 install -d -o user -g user /home/user/.raubot /home/user/workspace
 touch /home/user/.raubot/chromium && chown user:user /home/user/.raubot/chromium
+# Nothing typed into a page is saved by Chrome: no password manager, no autofill.
+for d in /etc/opt/chrome/policies/managed /etc/chromium/policies/managed; do
+	install -d "$d"
+	echo '{"PasswordManagerEnabled":false,"PasswordLeakDetectionEnabled":false,"AutofillAddressEnabled":false,"AutofillCreditCardEnabled":false}' > "$d/raubot.json"
+done
+# The journal stays in memory, and shells keep no history.
+install -d /etc/systemd/journald.conf.d && printf '[Journal]\nStorage=volatile\n' > /etc/systemd/journald.conf.d/raubot.conf
+systemctl restart systemd-journald && rm -rf /var/log/journal/*
+# Boat ships a 2 GB /swapfile on the root disk; swapped-out memory (vault values, tmpfs pages) would land on disk.
+swapoff -a; sed -i '/swapfile/d' /etc/fstab; systemctl mask swapfile.swap >/dev/null 2>&1; rm -f /swapfile
+echo 'vm.swappiness=0' > /etc/sysctl.d/90-raubot-noswap.conf
+grep -q 'HISTFILE=/dev/null' /etc/bash.bashrc || echo 'HISTFILE=/dev/null' >> /etc/bash.bashrc
 git config --system user.name raubot && git config --system user.email raubot@reducto.ai && git config --system init.defaultBranch main
 systemctl daemon-reload
 systemctl enable --now raubot-firewall.service raubot-boatd.service

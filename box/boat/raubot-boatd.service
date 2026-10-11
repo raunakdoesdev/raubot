@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 User=user
-Environment=HOME=/home/user DISPLAY=:0 XAUTHORITY=/home/user/.Xauthority RAUBOT_CHROME=chrome RAUBOT_DISPLAY=:0 RAUBOT_BW_DIR=/dev/shm/raubot-bw
+Environment=HOME=/home/user DISPLAY=:0 XAUTHORITY=/home/user/.Xauthority RAUBOT_CHROME=chrome RAUBOT_DISPLAY=:0 RAUBOT_BW_DIR=/dev/shm/raubot-bw RAUBOT_LOG=/dev/shm/raubot-browser.log RAUBOT_SCREEN_PORT=8913 RAUBOT_VOLATILE=/dev/shm/raubot-chrome HISTFILE=/dev/null
 # /workspace and /scratch live outside what Boat snapshots: /workspace points into /home/user, /scratch stays throwaway.
 ExecStartPre=+/bin/sh -c 'ln -sfn /home/user/workspace /workspace && mkdir -p /scratch /home/user/workspace && chown user:user /scratch /home/user/workspace'
 ExecStart=/usr/local/bin/node /opt/raubot/boatd.mjs
