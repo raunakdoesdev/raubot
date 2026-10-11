@@ -141,11 +141,12 @@ export class Raubot extends DurableObject<Env> implements Core {
 			const code = `const r = await tools${ref(path)}(${JSON.stringify(args ?? {})});
 const s = typeof r === "string" ? r : JSON.stringify(r);
 if (s === undefined || s.length <= 60000) return r;
-try { return { __spilled: await ${SPILL}({ data: s }) }; } catch (e) { return r; }`;
+try { return { __spilled: await ${SPILL}({ data: s }) }; } catch (e) { return { __spillError: String(e && e.message || e).slice(0, 1500), bytes: s.length }; }`;
 			const out = await mcp.call("execute", { code });
 			const r = JSON.parse(out);
 			if (r.status !== "completed") return out; // paused for approval: the agent shows it and resumes
 			let v = r.execution?.value;
+			if (v?.__spillError) throw new Error(`result too big (${v.bytes} bytes) and spill to R2 failed: ${v.__spillError}`);
 			if (v?.__spilled?.url) {
 				const res = await fetch(v.__spilled.url);
 				if (!res.ok) throw new Error(`spilled result fetch HTTP ${res.status}`);
