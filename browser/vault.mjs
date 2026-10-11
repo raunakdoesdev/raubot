@@ -6,19 +6,23 @@ import { promisify } from "node:util";
 const run = promisify(execFile);
 const BW = process.env.BW_BIN ?? new URL("./node_modules/.bin/bw", import.meta.url).pathname;
 const NEED = ["BW_CLIENTID", "BW_CLIENTSECRET", "BW_PASSWORD"];
+// The red-team fake vault (box/boat/redteam/bw), picked per call by the BW_BIN secret. No other path is accepted from a secret.
+const FAKE = new URL("../box/boat/redteam/bw", import.meta.url).pathname;
+const fake = (env) => env?.BW_BIN === FAKE;
+const bin = (env) => (fake(env) ? FAKE : BW);
 
 // On a Boat box this is tmpfs (RAUBOT_BW_DIR=/dev/shm/raubot-bw), so Bitwarden's login and cache never reach the disk or its snapshots.
 const DATA = process.env.RAUBOT_BW_DIR ?? `${process.env.HOME}/.raubot/bw`;
 
 let session, items, synced = 0;
 
-const bw = async (args, env = {}) => (await run(BW, args, { env: { ...process.env, BITWARDENCLI_APPDATA_DIR: DATA, BW_NOINTERACTION: "true", ...(session ? { BW_SESSION: session } : {}), ...env }, maxBuffer: 256 << 20 })).stdout;
+const bw = async (args, env = {}) => (await run(bin(env), args, { env: { ...process.env, BITWARDENCLI_APPDATA_DIR: DATA, BW_NOINTERACTION: "true", ...(session ? { BW_SESSION: session } : {}), ...env }, maxBuffer: 256 << 20 })).stdout;
 
 async function unlock(env) {
 	if (session) return;
-	const missing = NEED.filter((k) => !env[k]);
+	const missing = fake(env) ? [] : NEED.filter((k) => !env[k]);
 	if (missing.length) throw new Error(`Bitwarden isn't set up: missing ${missing.join(", ")}. Ask the user for them with tools.secrets (BW_CLIENTID / BW_CLIENTSECRET are the personal API key from bitwarden.com > Settings > Security > Keys; BW_PASSWORD is the master password).`);
-	const status = JSON.parse(await bw(["status"])).status;
+	const status = JSON.parse(await bw(["status"], env)).status;
 	if (status === "unauthenticated") await bw(["login", "--apikey"], env);
 	session = (await bw(["unlock", "--passwordenv", "BW_PASSWORD", "--raw"], env)).trim();
 }
@@ -89,13 +93,13 @@ export async function counted(env, credentialId, count) {
 	if (!item) return;
 	const fresh = JSON.parse(await bw(["get", "item", item.id]));
 	for (const p of fresh.login.fido2Credentials) if (p.credentialId === credentialId && Number(p.counter) < count) p.counter = String(count);
-	await edit(item.id, Buffer.from(JSON.stringify(fresh)).toString("base64"));
+	await edit(item.id, Buffer.from(JSON.stringify(fresh)).toString("base64"), env);
 	items = undefined;
 }
 
 // `bw edit item <id>` reads the encoded item from stdin, keeping it out of argv.
-const edit = (id, encoded) => new Promise((ok, fail) => {
-	const p = execFile(BW, ["edit", "item", id], { env: { ...process.env, BITWARDENCLI_APPDATA_DIR: DATA, BW_NOINTERACTION: "true", BW_SESSION: session } }, (e) => (e ? fail(e) : ok()));
+const edit = (id, encoded, env) => new Promise((ok, fail) => {
+	const p = execFile(bin(env), ["edit", "item", id], { env: { ...process.env, BITWARDENCLI_APPDATA_DIR: DATA, BW_NOINTERACTION: "true", BW_SESSION: session } }, (e) => (e ? fail(e) : ok()));
 	p.stdin.end(encoded);
 });
 
@@ -105,4 +109,4 @@ export const refresh = () => { items = undefined; };
 /** Drops the decrypted items from memory (after a browser run). */
 export const forget = () => { items = undefined; };
 
-export const ready = (env) => NEED.every((k) => env[k]);
+export const ready = (env) => fake(env) || NEED.every((k) => env[k]);
