@@ -11,7 +11,7 @@ const TOKEN = /^\/s\/([\w-]{32})(\.json)?$/;
 /** Secret-link pages never pass their URL (the token) on as a Referer, and aren't cached. */
 const noReferrer = (r: Response) => { const o = new Response(r.body, r); o.headers.set("referrer-policy", "no-referrer"); o.headers.set("cache-control", "no-store"); return o; };
 
-export type EdgeEnv = { BOX: DurableObjectNamespace<Computer>; ASSETS: Fetcher } & OidcEnv & AccessEnv;
+export type EdgeEnv = { BOX: DurableObjectNamespace<Computer>; ASSETS: Fetcher; BOX_BACKEND?: string } & OidcEnv & AccessEnv;
 
 /** Routes that need no core: the built pages (web/), the box status, and a secret link's page with its preview tags. */
 export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Promise<Response>) => {
@@ -49,7 +49,8 @@ export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Pro
 	if (pathname === "/files.json" || pathname === "/file" || pathname.startsWith("/file/")) return files(req, env, url);
 	const screen = /^\/agent\/(\d+)\/screen\.jpg$/.exec(pathname);
 	if (screen) {
-		const s = await env.BOX.getByName(`agent-${screen[1]}`).screen();
+		// On Boat a computer agent works in raubot's box (see Raubot.#boxOf).
+		const s = (await env.BOX.getByName(`agent-${screen[1]}`).screen()) ?? (env.BOX_BACKEND === "boat" ? await env.BOX.getByName("main").screen() : undefined);
 		return s ? new Response(s.jpeg, { headers: { "content-type": "image/jpeg", "cache-control": "no-store", "x-url": s.url } }) : new Response(null, { status: 204 });
 	}
 	if (pathname === "/box") {

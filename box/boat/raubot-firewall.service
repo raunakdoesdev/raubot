@@ -1,0 +1,12 @@
+[Unit]
+Description=raubot default-deny egress
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/raubot/firewall.sh /opt/raubot/manifest.json
+
+[Install]
+WantedBy=multi-user.target

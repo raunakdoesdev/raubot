@@ -9,7 +9,7 @@ const NEED = ["BW_CLIENTID", "BW_CLIENTSECRET", "BW_PASSWORD"];
 
 let session, items, synced = 0;
 
-const bw = async (args, env = {}) => (await run(BW, args, { env: { ...process.env, BITWARDENCLI_APPDATA_DIR: `${process.env.HOME}/.raubot/bw`, BW_NOINTERACTION: "true", ...(session ? { BW_SESSION: session } : {}), ...env }, maxBuffer: 256 << 20 })).stdout;
+const bw = async (args, env = {}) => (await run(BW, args, { env: { ...process.env, BITWARDENCLI_APPDATA_DIR: process.env.RAUBOT_BW_DIR ?? `${process.env.HOME}/.raubot/bw`, BW_NOINTERACTION: "true", ...(session ? { BW_SESSION: session } : {}), ...env }, maxBuffer: 256 << 20 })).stdout;
 
 async function unlock(env) {
 	if (session) return;

@@ -1,0 +1,25 @@
+#!/bin/bash
+# Run as root on a clean Boat sandbox by build.mjs, with this directory copied to /home/user/.raubot-template.
+set -euo pipefail
+cd "$(dirname "$0")"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+command -v jq >/dev/null || apt-get install -y -qq jq >/dev/null
+apt-get install -y -qq --no-install-recommends $(jq -r '.apt | join(" ")' manifest.json) >/dev/null
+install -d /opt/raubot
+install -m 0644 boatd.mjs manifest.json /opt/raubot/
+install -m 0755 firewall.sh /opt/raubot/
+install -m 0644 raubot-boatd.service raubot-firewall.service /etc/systemd/system/
+# The box's commands run as `user`; browser/ links its `vault` CLI into /usr/local/bin.
+chown user:user /usr/local/bin
+# The browser uses the preinstalled Chrome on the real desktop, so Playwright's Chromium download is skipped.
+install -d -o user -g user /home/user/.raubot /home/user/workspace
+touch /home/user/.raubot/chromium && chown user:user /home/user/.raubot/chromium
+git config --system user.name raubot && git config --system user.email raubot@reducto.ai && git config --system init.defaultBranch main
+systemctl daemon-reload
+systemctl enable --now raubot-firewall.service raubot-boatd.service
+sleep 1
+curl -fsS http://127.0.0.1:8912/health
+curl -fsS -m 10 -o /dev/null -w 'egress https %{http_code}\n' https://github.com
+! curl -fsS -m 5 -o /dev/null http://169.254.169.254/ 2>/dev/null || { echo "metadata reachable" >&2; exit 1; }
+echo template ok

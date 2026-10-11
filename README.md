@@ -21,6 +21,7 @@ The design follows Victor Taelin's [OptChat](https://gist.github.com/VictorTaeli
   - `prompts.ts`: the system and compactor prompts, plus the constants.
   - `mcp.ts`, `oauth.ts`: the Executor client and its OAuth.
   - `box.ts`: the `Computer` container (Durable Object scheduling policy, needed for snapshots) behind the `bash` tool. `/workspace` is a clone of the Artifacts repo `raubot/workspace`, auto-committed and pushed after every command (files over 10 MB are git-ignored). The whole container filesystem is also saved as a Container snapshot when idle for 10 minutes (and every 15 minutes while in use), so installs and big files persist. `/workspace/raubot` is a clone of this repo. The box rules (setup.sh, /scratch, self-deploy) live in `BOX.md`, which the prompt points raubot to.
+  - `boat.ts`: the Boat backend (`BOX_BACKEND=boat`, staging). Each box is a Boat VM whose disk persists. raubot's box starts from the named snapshot `BOAT_TEMPLATE`, which `box/boat/build.ts` builds from `box/boat/manifest.json` (packages, default-deny egress, the `boatd` daemon). Subagent boxes are forks of it. Computer agents run in raubot's own VM, so they share its disk and Chrome profile. The Worker sends commands, stdin and secrets to `boatd` over its private `host` URL, never through Boat's command API. Boxes are created with `noEnv` (no Boat account credentials) and `monitoring: false` (no command history), and git tokens come per command via `GIT_CONFIG_*`. If Boat fails, the box runs on the Cloudflare container for 10 minutes.
 - `src/app/`: the web app, a client of `Core`. `index.ts` serves the chat, settings and tree pages, plus the `/ws` WebSocket that streams `CoreEvent`s.
 
 ## Source and deploys
@@ -36,5 +37,6 @@ npm install
 echo "OPENAI_API_KEY=sk-..." > .dev.vars
 npm run dev       # http://localhost:8787
 npm run deploy    # raubot.reducto.ai, behind Cloudflare Access
+BOAT_API_KEY=... npm run boat:template    # build the Boat template; put the printed name in BOAT_TEMPLATE
 npm run deploy:staging    # raubot-staging.reducto.ai: separate chat, box and Artifacts namespace `raubot-staging`; test here, not on the main instance
 ```

@@ -44,7 +44,7 @@ import * as hb from "./heartbeat.ts";
 import { finals } from "./replies.ts";
 import * as voice from "./voice.ts";
 
-type Env = { SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
+type Env = { BOX_BACKEND?: string; SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
 
 type Services = Storage | Box | Jobs | JobHost | Secrets;
 type CronArgs = { add?: Partial<cron.Cron> & Pick<cron.Cron, "id" | "schedule" | "prompt">; remove?: string[]; run?: string };
@@ -672,7 +672,12 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		return r.answers.asks.noul > 0.5 && r.answers.about.choice === "other";
 	}
 
-	#boxOf(conv: unknown) { return conv === this.root.id ? "main" : `agent-${conv}`; }
+	/** On Boat a computer agent is raubot's buddy in its box: the same VM, disk and Chrome profile. Other subagents get their own box. */
+	#boxOf(conv: unknown) {
+		if (conv === this.root.id) return "main";
+		if (this.env.BOX_BACKEND === "boat" && this.ctx.storage.kv.get<AgentInfo>(`agentinfo:${conv}`)?.computer) return "main";
+		return `agent-${conv}`;
+	}
 
 	/** `tools.agent`: a child conversation keyed by the script's call id, so a thawed script finds it again. */
 	#agent(scope: string, caller: unknown, owner?: { api: ToolExecutionApi; ctx: Context }) {
