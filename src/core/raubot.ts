@@ -154,7 +154,9 @@ try { return { __spilled: await ${SPILL}({ data: s }) }; } catch (e) { return { 
 				try { v = JSON.parse(t); } catch { v = t; }
 			}
 			if (!r.execution?.ok || v?.isError) throw new Error(JSON.stringify(r.execution?.error ?? v));
-			const res = v?.structuredContent?.result ?? v?.structuredContent ?? v?.content?.map((c: { text?: string }) => c.text).join("\n") ?? v;
+			// Text-only content joins to plain text; content with resources/images (e.g. slack_read_file's base64 blob) stays whole as JSON.
+			const content = v?.content as { type?: string; text?: string }[] | undefined;
+			const res = v?.structuredContent?.result ?? v?.structuredContent ?? (content?.every((c) => typeof c.text === "string") ? content.map((c) => c.text).join("\n") : content) ?? v;
 			return typeof res === "string" ? res : JSON.stringify(res);
 		};
 		return { nested, app };
