@@ -77,6 +77,8 @@ type Block = { cache_control?: unknown };
 type AnthropicPayload = { system?: Block[] | string; tools?: Block[]; messages?: { role: string; content: Block[] | string }[] };
 
 /** Anthropic marks: the system prompt (after tools, so it covers both), the view's last whole block, and pi's request-end mark. No 1h TTL. */
+/** OpenRouter Executor app (exe/imagegen) profile whose `spill` tool parks oversized app results in R2. */
+const SPILL_PROFILE = "ins_be2a31bf-771f-45a5-b7c0-1ae3fdd88f47";
 const WEB_SEARCH = { type: "openrouter:web_search", parameters: { max_results: 5 } } as unknown as Block;
 
 export const markView = (mark: number) => (payload: unknown) => {
@@ -133,11 +135,23 @@ export class Raubot extends DurableObject<Env> implements Core {
 			execute: (args: Record<string, unknown>) => mcp.call(t.name, args),
 		}));
 		const ref = (path: string[]) => path.map((k) => (/^[A-Za-z_$][\w$]*$/.test(k) ? `.${k}` : `[${JSON.stringify(k)}]`)).join("");
+		// Executor cuts execute output at 64KB. A bigger result is parked in R2 by the OpenRouter app's `spill` tool inside the same execute (no second call), then fetched here whole.
+		const SPILL = `tools.openrouter.profiles[${JSON.stringify(SPILL_PROFILE)}].spill`;
 		const app: App = async (path, args) => {
-			const out = await mcp.call("execute", { code: `return await tools${ref(path)}(${JSON.stringify(args ?? {})});` });
+			const code = `const r = await tools${ref(path)}(${JSON.stringify(args ?? {})});
+const s = typeof r === "string" ? r : JSON.stringify(r);
+if (s === undefined || s.length <= 60000) return r;
+try { return { __spilled: await ${SPILL}({ data: s }) }; } catch (e) { return r; }`;
+			const out = await mcp.call("execute", { code });
 			const r = JSON.parse(out);
 			if (r.status !== "completed") return out; // paused for approval: the agent shows it and resumes
-			const v = r.execution?.value;
+			let v = r.execution?.value;
+			if (v?.__spilled?.url) {
+				const res = await fetch(v.__spilled.url);
+				if (!res.ok) throw new Error(`spilled result fetch HTTP ${res.status}`);
+				const t = await res.text();
+				try { v = JSON.parse(t); } catch { v = t; }
+			}
 			if (!r.execution?.ok || v?.isError) throw new Error(JSON.stringify(r.execution?.error ?? v));
 			const res = v?.structuredContent?.result ?? v?.structuredContent ?? v?.content?.map((c: { text?: string }) => c.text).join("\n") ?? v;
 			return typeof res === "string" ? res : JSON.stringify(res);
