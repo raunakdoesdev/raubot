@@ -56,6 +56,12 @@ export interface Core {
 	traceBody(run: string, id: number): Promise<{ args: string; out?: string } | undefined>;
 	/** Every subagent (newest first) for search, without last output. */
 	agentIndex(): Promise<Omit<AgentRow, "last">[]>;
+	/** Voice agent tools: ask raubot (internal, never sent to a channel), wait for a pending reply, peek at status. */
+	voiceAsk(message: string, ms?: number): Promise<{ id: string } & ({ status: "done"; reply: string } | { status: "working"; steps: string[] } | { status: "unknown" })>;
+	voiceWait(id: string, ms?: number): Promise<{ status: "done"; reply: string } | { status: "working"; steps: string[] } | { status: "unknown" }>;
+	voiceStatus(): Promise<{ busy: boolean; queued: number; steps: string[] }>;
+	/** Mint an ephemeral realtime key for the browser. */
+	voiceSession(): Promise<{ key: string; expires_at?: number; model: string }>;
 	/** POST /s/devin/<key>: a Devin run's signed callback. */
 	devinHook(key: string, req: Request): Promise<Response>;
 	/** POST /s/devin/<key>/image: a Devin run's signed screenshot upload. */

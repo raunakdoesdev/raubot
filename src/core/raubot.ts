@@ -42,6 +42,7 @@ import * as web from "./search.ts";
 import * as devin from "./devin.ts";
 import * as hb from "./heartbeat.ts";
 import { finals } from "./replies.ts";
+import * as voice from "./voice.ts";
 
 type Env = { SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
 
@@ -381,7 +382,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			inputSchema: Type.Object({ send: Type.Optional(Type.Object({ id: Type.Integer(), message: Type.String() })), stop: Type.Optional(Type.Array(Type.Integer())) }),
 			execute: () => Promise.reject(new Error("unbound")),
 		};
-		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF}\n\n${CRONS}\n\n${HEARTBEATS}\n\n${DEVIN}${executor.app ? `\n\n${EXECUTOR}` : ""}\n\n${COMPACTIONS}`;
+		const system = `${MASTER}\n${channelDoc(this.#channels)}\n${voice.STYLE}\n\n${VIEW_DOC}\n\n${SELF}\n\n${CRONS}\n\n${HEARTBEATS}\n\n${DEVIN}${executor.app ? `\n\n${EXECUTOR}` : ""}\n\n${COMPACTIONS}`;
 		nested.push(agentDoc, agentsDoc, {
 			name: "jobs",
 			description: "Your background jobs, newest first: { id, label, status, started, ended, deadline }. `cancel: [ids]` stops running ones (no result comes back); `prune: true` forgets finished ones.",
@@ -596,7 +597,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				const busy = this.busy();
 				const replies = finals(this.memory.log, r.start, r.sent ?? -1, !busy);
 				for (const { at, text: said } of replies) {
-					const reply = !cron.SILENT.test(said) ? hb.scrub(said) || undefined : undefined;
+					// Replies to voice inputs belong to the voice agent: never to iMessage or any channel.
+					const reply = !cron.SILENT.test(said) && !voice.ownedByVoice(this.memory.log, at) ? hb.scrub(said) || undefined : undefined;
 					await this.ctx.storage.put("reply", { ...r, sent: at }); // at most once, even across a restart
 					if (reply) await this.#fx(deliver(this.#channels, r, reply)).catch((e) => console.error("deliver", e));
 				}
@@ -770,9 +772,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	/** Every message comes from a channel; non-app ones are tagged for the model and get the turn's reply. */
 	async send(input: string, from: Origin = APP, files: string[] = []) {
 		// The user's own messages set where heartbeat alerts go (target "last").
-		if (!MACHINE.test(input)) await this.ctx.storage.put("last-from", from);
+		// Voice is internal: it never becomes where replies or alerts go.
+		const isVoice = from.channel === "voice";
+		if (!MACHINE.test(input) && !isVoice) await this.ctx.storage.put("last-from", from);
 		input = tag(from, [input, ...files.map((f) => `[attached: ${f}]`)].filter(Boolean).join("\n"));
-		if (from.channel !== APP.channel) {
+		if (from.channel !== APP.channel && !isVoice) {
 			// A message joining a turn keeps the earliest start, so replies to earlier messages in it still go out.
 			const prev = (this.busy() || (await this.#queued()).length) ? await this.ctx.storage.get<Reply>("reply") : undefined;
 			const reply: Reply = prev ? { ...from, start: prev.start, ...(prev.sent !== undefined && { sent: prev.sent }) } : { ...from, start: this.memory.log.length };
@@ -783,6 +787,47 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		await this.ctx.storage.put("inbox", queued);
 		this.#broadcast({ queued });
 		void this.#drain().catch((e) => this.#broadcast({ error: String(e) }));
+	}
+
+	#voice = new Map<string, { start: number; input: string; at: number }>();
+
+	/** Voice agent -> raubot: queue a "[via voice]" message and wait up to ms for raubot's reply (never delivered to a channel). */
+	async voiceAsk(message: string, ms = 20_000) {
+		const id = crypto.randomUUID().slice(0, 8);
+		const text = message.trim().slice(0, 4000);
+		this.#voice.set(id, { start: this.memory.log.length, input: `${voice.TAG} ${text}`, at: Date.now() });
+		for (const [k, v] of this.#voice) if (Date.now() - v.at > 3600_000) this.#voice.delete(k);
+		await this.send(text, { channel: "voice", to: "" });
+		return { id, ...(await this.voiceWait(id, ms)) };
+	}
+
+	async voiceWait(id: string, ms = 20_000): Promise<{ status: "done"; reply: string } | { status: "working"; steps: string[] } | { status: "unknown" }> {
+		const a = this.#voice.get(id);
+		if (!a) return { status: "unknown" };
+		const end = Date.now() + Math.min(ms, 25_000);
+		for (;;) {
+			const log = this.memory.log;
+			const r = voice.answer(log, a.start, a.input, !this.busy() && !(await this.#queued()).length);
+			if (r !== undefined) return { status: "done", reply: r || "(raubot finished without a spoken reply)" };
+			if (Date.now() >= end) return { status: "working", steps: voice.progress(log, Math.max(a.start, voice.landed(log, a.start, a.input))) };
+			await new Promise((res) => setTimeout(res, 600));
+		}
+	}
+
+	async voiceStatus() {
+		return { busy: this.busy(), queued: (await this.#queued()).length, steps: voice.progress(this.memory.log, this.memory.log.length - 8) };
+	}
+
+	/** An ephemeral OpenAI Realtime key for the browser (10 min); the API key never leaves the Worker. */
+	async voiceSession() {
+		const model = (this.env as { VOICE_MODEL?: string }).VOICE_MODEL || voice.DEFAULT_MODEL;
+		const r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+			method: "POST", headers: { authorization: `Bearer ${this.env.OPENAI_API_KEY}`, "content-type": "application/json" },
+			body: JSON.stringify(voice.sessionConfig(model)),
+		});
+		const body = (await r.json().catch(() => ({}))) as { value?: string; expires_at?: number; error?: { message?: string } };
+		if (!r.ok || !body.value) throw new Error(`OpenAI realtime ${r.status}: ${body.error?.message ?? "no client secret"}`);
+		return { key: body.value, expires_at: body.expires_at, model };
 	}
 
 	/** Inputs pi holds for the running turn's next step: shown in the app until they land in the log. */

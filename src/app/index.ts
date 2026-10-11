@@ -17,7 +17,7 @@ export type EdgeEnv = { BOX: DurableObjectNamespace<Computer>; ASSETS: Fetcher }
 export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Promise<Response>) => {
 	const url = new URL(req.url), { pathname } = url;
 	const asset = (p: string) => env.ASSETS.fetch(new URL(p, url));
-	if (pathname === "/" || pathname === "/settings" || pathname === "/tree" || pathname.startsWith("/assets/") || pathname === "/favicon.png" || pathname === "/raubot-512.png" || pathname === "/raubot-mascot.png" || pathname === "/apple-touch-icon.png") return asset(pathname);
+	if (pathname === "/" || pathname === "/settings" || pathname === "/tree" || pathname === "/voice" || pathname.startsWith("/assets/") || pathname === "/favicon.png" || pathname === "/raubot-512.png" || pathname === "/raubot-mascot.png" || pathname === "/apple-touch-icon.png") return asset(pathname);
 	// Secret links skip Access, so their page loads its assets relative to /s/.
 	if (pathname.startsWith("/s/assets/") || pathname === "/s/favicon.png" || pathname === "/s/apple-touch-icon.png") return asset(pathname.slice(2));
 	if (pathname.startsWith("/s/oidc/")) return oidc(req, env);
@@ -102,6 +102,23 @@ export const serve = async (core: Core, req: Request): Promise<Response> => {
 	switch (url.pathname) {
 		case "/ws": return socket(core);
 		case "/settings.json": return Response.json(await core.settings());
+		// Voice: POST only (no CSRF-able GETs with side effects); all behind Access like the rest.
+		case "/voice/session":
+			if (req.method !== "POST") break;
+			try { return Response.json(await core.voiceSession(), { headers: { "cache-control": "no-store" } }); }
+			catch (e) { return new Response(e instanceof Error ? e.message : String(e), { status: 502 }); }
+		case "/voice/ask": {
+			if (req.method !== "POST") break;
+			const { message } = ((await req.json().catch(() => ({}))) ?? {}) as { message?: string };
+			if (!message?.trim()) return new Response("empty message", { status: 400 });
+			return Response.json(await core.voiceAsk(message));
+		}
+		case "/voice/wait": {
+			if (req.method !== "POST") break;
+			const { id } = ((await req.json().catch(() => ({}))) ?? {}) as { id?: string };
+			return Response.json(await core.voiceWait(String(id ?? "")));
+		}
+		case "/voice/status": return Response.json(await core.voiceStatus());
 		case "/tree.json": return Response.json(core.tree(url.searchParams));
 		case "/prompt": return new Response(core.prompt(), { headers: { "content-type": "text/plain; charset=utf-8" } });
 		case "/secrets.json":

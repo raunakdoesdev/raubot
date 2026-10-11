@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick } from "svelte";
-	import { ArrowDown, ArrowUp, ChevronRight, PanelLeft, Paperclip, Settings, Square, X } from "@lucide/svelte";
+	import { ArrowDown, ArrowUp, ChevronRight, Mic, PanelLeft, Paperclip, Settings, Square, X } from "@lucide/svelte";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import ToolRow from "$lib/ToolRow.svelte";
@@ -17,7 +17,7 @@
 	type Line = { i: number; kind: string; text: string; date?: number };
 	/** `body` is the call line; `echo` its result; codemode rows carry their `code` and `hash` (matched to a live trace), job rows their `job` id. */
 	type Tool = { kind: "tool"; i: number; name: string; head: string; body: string; arg?: string; code?: string; hash?: string; echo?: string; date?: number; job?: number };
-	type Item = { kind: "user" | "talk"; i: number; text: string } | Tool;
+	type Item = { kind: "user" | "talk"; i: number; text: string; voice?: boolean } | Tool;
 	type Ask = { token: string; name: string; why: string };
 
 	/** A message shown the moment it's sent, until the server echoes it back queued, steering or in the log (t3code's optimistic send). */
@@ -60,7 +60,7 @@
 			if (x.kind === "tool") open.push({ name, at: items.length - 1 });
 		} else {
 			open = [];
-			items.push({ kind: x.kind === "user" ? "user" : "talk", i: x.i, text: x.kind === "user" ? strip(x.text) : x.text });
+			items.push({ kind: x.kind === "user" ? "user" : "talk", i: x.i, text: x.kind === "user" ? strip(x.text) : x.text, voice: x.kind === "user" && x.text.startsWith("[via voice]") });
 		}
 	}
 
@@ -188,6 +188,7 @@
 	<Header>
 		{#snippet lead()}<Button variant="ghost" size="icon-sm" class="md:hidden" aria-label="menu" onclick={() => (menu = true)}><PanelLeft /></Button>{/snippet}
 		<span class="truncate text-sm text-muted-foreground">{status}</span>
+		<Button href="/voice" variant="ghost" size="icon-sm" aria-label="voice"><Mic /></Button>
 		<Button href="/settings" variant="ghost" size="icon-sm" aria-label="settings"><Settings /></Button>
 	</Header>
 
@@ -196,7 +197,8 @@
 			<Virtual {items} key={(x) => x.i} scroller={main} bind:stuck>
 				{#snippet row(x)}
 					{#if x.kind === "user"}
-						<div class="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap [overflow-wrap:anywhere]" title="#{x.i}">{@html plain(x.text)}</div>
+						{#if x.voice}<div class="ml-auto max-w-[85%] text-right text-xs text-violet-400">🎙 voice agent → raubot</div>{/if}
+						<div class={["ml-auto max-w-[85%] rounded-2xl rounded-br-md px-4 py-2.5 whitespace-pre-wrap [overflow-wrap:anywhere]", x.voice ? "bg-violet-500/15" : "bg-secondary"]} title="#{x.i}">{@html plain(x.text)}</div>
 					{:else if x.kind === "talk"}
 						<div class="md" title="#{x.i}">{@html md(x.text)}</div>
 					{:else if x.kind === "tool"}
