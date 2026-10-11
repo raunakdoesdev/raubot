@@ -2,7 +2,7 @@
 // with BW_CLIENTID, BW_CLIENTSECRET and BW_PASSWORD in the env of this one command only.
 // It unlocks the vault in memory (Bitwarden data stays on tmpfs) and makes needles from the master credentials and every vault passkey
 // (PKCS#8 DER, base64, base64url, PEM lines, private scalar, credential id as GUID, hex, raw bytes, base64 and base64url).
-// Then it greps every file under / (this also reads files Boat restores lazily from the snapshot) and scans the raw root disk.
+// Then it greps every file under / plus the tmpfs browser log and volatile journal (this also reads files Boat restores lazily from the snapshot) and scans the raw root disk.
 // Needles reach grep and rawscan.py on stdin, never in a file or argv. Output is names, paths and counts, never values.
 // A canary written to the disk on purpose must be found by both scans, so a scan that sees nothing can't pass.
 import crypto from "node:crypto";
@@ -62,7 +62,7 @@ try {
 	// grep patterns are lines of text, so the binary forms are left to the raw scan.
 	const grepped = needles.filter((n) => !n.b.includes(0x0a) && !n.b.includes(0x00));
 	const t = Date.now();
-	const files = (await sh("sudo", ["grep", "-rlaF", "-f", "/dev/stdin", "--exclude-dir=proc", "--exclude-dir=sys", "--exclude-dir=dev", "--exclude-dir=run", "/"], grepped.map((n) => n.b.toString()).join("\n") + "\n")).split("\n").filter(Boolean);
+	const files = (await sh("sudo", ["grep", "-rlaF", "-f", "/dev/stdin", "--exclude-dir=proc", "--exclude-dir=sys", "--exclude-dir=dev", "--exclude-dir=run", "/", ...["/dev/shm/raubot-browser.log", "/run/log/journal"].filter((f) => fs.existsSync(f))], grepped.map((n) => n.b.toString()).join("\n") + "\n")).split("\n").filter(Boolean);
 	report.files = { s: Math.round((Date.now() - t) / 1000), canaryFound: files.includes(CANARY), secretFiles: files.filter((f) => f !== CANARY) };
 	if (!report.files.canaryFound || report.files.secretFiles.length) fail = true;
 	if (!filesOnly) {
