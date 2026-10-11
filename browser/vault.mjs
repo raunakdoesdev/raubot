@@ -31,8 +31,8 @@ async function unlock(env) {
 async function all(env, fresh = false) {
 	await unlock(env);
 	if (fresh || !items || Date.now() - synced > 60_000) {
-		await bw(["sync"]);
-		items = JSON.parse(await bw(["list", "items"]));
+		await bw(["sync"], env);
+		items = JSON.parse(await bw(["list", "items"], env));
 		synced = Date.now();
 	}
 	return items;
@@ -70,7 +70,7 @@ export const uris = async (env, ref) => ((await item(env, ref)).i.login?.uris ??
 /** The value a ref points to. */
 export async function resolve(env, ref) {
 	const { i, field } = await item(env, ref);
-	const v = field === "totp" ? i.login?.totp && (await bw(["get", "totp", i.id])).trim()
+	const v = field === "totp" ? i.login?.totp && (await bw(["get", "totp", i.id], env)).trim()
 		: field === "uri" ? i.login?.uris?.[0]?.uri
 		: field === "notes" ? i.notes
 		: ["username", "password"].includes(field) ? i.login?.[field]
