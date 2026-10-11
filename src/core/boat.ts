@@ -75,6 +75,17 @@ export class Boat {
 		return { out: `${r.stdout ?? ""}${r.stderr ?? ""}`, exitCode: r.exitCode };
 	}
 
+	/** A new signed desktop stream URL (Moonlight with clipboard, valid ten minutes), viewer overlay off. Secret: never log, store or send it. */
+	async desktop(id: string) {
+		for (let i = 0; i < 30; i++, await sleep(1000)) {
+			const r = await this.#call<{ desktopUrl?: string; provisioning?: boolean }>("POST", `/sandboxes/${id}/desktop?theme=light`, {});
+			if (!r.desktopUrl) continue;
+			const [base, hash] = r.desktopUrl.split("#");
+			return `${base}${base.includes("?") ? "&" : "?"}overlay=0${hash === undefined ? "" : `#${hash}`}`;
+		}
+		throw new BoatError(`boat desktop ${id}: still provisioning after 30s`);
+	}
+
 	/** Writes a file under /home/user (or /tmp). */
 	file(id: string, path: string, content: string) { return this.#call("PUT", `/sandboxes/${id}/files`, { path, content, encoding: "utf8" }); }
 

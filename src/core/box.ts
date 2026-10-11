@@ -12,6 +12,8 @@ const IDLE = 10 * 60_000;
 const CHECKPOINT = 15 * 60_000;
 /** After a Boat failure the box runs on Cloudflare Containers for this long before trying Boat again. */
 const DOWN = 10 * 60_000;
+/** A human's take over holds the box's computer use at most this long without a hand back. */
+const HOLD = 30 * 60_000;
 
 const clip = (s: string) => (s.length <= CAP ? s : `${s.slice(0, CAP / 2)}\n…[${s.length - CAP} chars cut]…\n${s.slice(-CAP / 2)}`);
 
@@ -64,6 +66,8 @@ export class Computer extends DurableObject<Env> {
 	#git: Promise<unknown> = Promise.resolve();
 	/** Set while this box runs on Boat: its sandbox's daemon. */
 	#boat?: Daemon;
+	/** Computer-use calls waiting for a human to hand the desktop back. */
+	#waiters: (() => void)[] = [];
 	/** A Boat boot is under way (the container isn't running yet). */
 	#up = false;
 
@@ -344,6 +348,35 @@ export class Computer extends DurableObject<Env> {
 		for (const [d, cs] of Object.entries(changed)) await (cs.length ? this.ctx.storage.put(`jar:${d}`, cs) : this.ctx.storage.delete(`jar:${d}`));
 	}
 
+	/** A new desktop URL for a human to drive this box (Boat only; undefined on the fallback). Holds its computer use until release(). Never boots a subagent box that has no sandbox. */
+	async desktop() {
+		if (this.#agent && !(await this.ctx.storage.get("boat"))) return undefined;
+		await this.#boot();
+		if (!this.#boat || !this.env.BOAT_API_KEY) return undefined;
+		const url = await new Boat(this.env.BOAT_API_KEY).desktop(this.#boat.id);
+		await this.ctx.storage.put({ held: Date.now() + HOLD, last: Date.now() });
+		return url;
+	}
+
+	/** The human hands the desktop back: waiting computer-use calls go on. */
+	async release() {
+		await this.ctx.storage.delete("held");
+		for (const w of this.#waiters.splice(0)) w();
+	}
+
+	async #held() { return Math.max(0, ((await this.ctx.storage.get<number>("held")) ?? 0) - Date.now()); }
+
+	/** Waits (at most `ms`) while a human holds the desktop. Resolves with whether it's still held. */
+	async free(ms = HOLD) {
+		const left = await this.#held();
+		if (!left) return false;
+		await new Promise<void>((ok) => {
+			const t = setTimeout(ok, Math.min(ms, left));
+			this.#waiters.push(() => { clearTimeout(t); ok(); });
+		});
+		return (await this.#held()) > 0;
+	}
+
 	/** The live view: the browser's current tab, or undefined when the box or its browser isn't running. Never starts the box. */
 	async screen() {
 		if (this.#boat) return screen(this.#boat);
@@ -354,8 +387,8 @@ export class Computer extends DurableObject<Env> {
 	}
 
 	async status() {
-		const [snapshot, last, saved, boat, boatDown, alarm] = await Promise.all(["snapshot", "last", "saved", "boat", "boatDown"].map((k) => this.ctx.storage.get(k)).concat(this.ctx.storage.getAlarm()));
-		return { backend: this.#boat ? "boat" : this.ctx.container!.running ? "cf" : undefined, running: this.#running, boat: (boat as Daemon | undefined)?.id, boatDown, images: this.ctx.container!.images, snapshot, last, saved, alarm };
+		const [snapshot, last, saved, boat, boatDown, held, alarm] = await Promise.all(["snapshot", "last", "saved", "boat", "boatDown", "held"].map((k) => this.ctx.storage.get(k)).concat(this.ctx.storage.getAlarm()));
+		return { backend: this.#boat ? "boat" : this.ctx.container!.running ? "cf" : undefined, running: this.#running, boat: (boat as Daemon | undefined)?.id, boatDown, held: ((held as number | undefined) ?? 0) > Date.now(), images: this.ctx.container!.images, snapshot, last, saved, alarm };
 	}
 
 	async alarm() {
@@ -364,7 +397,7 @@ export class Computer extends DurableObject<Env> {
 		const last = (await this.ctx.storage.get<number>("last")) ?? 0;
 		// Boat snapshots the disk every minute by itself; raubot only stops the sandbox when it's idle.
 		if (!c.running && (await this.ctx.storage.get("boat"))) {
-			if (this.#busy || now - last <= IDLE) return this.ctx.storage.setAlarm(now + TICK);
+			if (this.#busy || now - last <= IDLE || (await this.#held())) return this.ctx.storage.setAlarm(now + TICK);
 			if ((await this.ctx.storage.get<number>("saved") ?? 0) < last || this.#boat) await this.#boatStop();
 			return;
 		}

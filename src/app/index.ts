@@ -53,6 +53,24 @@ export const edge = async (req: Request, env: EdgeEnv, core: (r: Request) => Pro
 		const s = (await env.BOX.getByName(`agent-${screen[1]}`).screen()) ?? (env.BOX_BACKEND === "boat" ? await env.BOX.getByName("main").screen() : undefined);
 		return s ? new Response(s.jpeg, { headers: { "content-type": "image/jpeg", "cache-control": "no-store", "x-url": s.url } }) : new Response(null, { status: 204 });
 	}
+	// Take control: a new Boat desktop URL per request, only to this app's own page (same-origin fetch metadata), never logged or stored.
+	const take = /^\/takeover\/(main|agent-\d+)(\/release)?$/.exec(pathname);
+	if (take) {
+		if (req.headers.get("sec-fetch-site") !== "same-origin") return new Response("open this from the raubot app", { status: 403 });
+		const box = env.BOX.getByName(take[1]), main = env.BOX.getByName("main");
+		// On Boat a computer agent works in raubot's box (see Raubot.#boxOf), so its desktop is main's.
+		const viaMain = take[1] !== "main" && env.BOX_BACKEND === "boat";
+		if (take[2]) {
+			if (req.method !== "POST") return new Response("POST only", { status: 405 });
+			await Promise.all([box.release(), viaMain ? main.release() : undefined]);
+			return new Response("released");
+		}
+		const t0 = Date.now();
+		const url = (await box.desktop()) ?? (viaMain ? await main.desktop() : undefined);
+		console.log("takeover", JSON.stringify({ box: take[1], ms: Date.now() - t0, ok: !!url }));
+		if (!url) return new Response("This box isn't on Boat, so there's no desktop to take over.", { status: 404 });
+		return new Response(null, { status: 302, headers: { location: url, "cache-control": "no-store", "referrer-policy": "no-referrer", "server-timing": `mint;dur=${Date.now() - t0}` } });
+	}
 	if (pathname === "/box") {
 		const box = env.BOX;
 		const b = box.getByName("main");
