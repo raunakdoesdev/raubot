@@ -385,15 +385,15 @@ export class Computer extends DurableObject<Env> {
 
 	async #held() { return Math.max(0, ((await this.ctx.storage.get<number>("held")) ?? 0) - Date.now()); }
 
-	/** Waits (at most `ms`) while a human holds the desktop. Resolves with whether it's still held. */
-	async free(ms = HOLD) {
+	/** Waits (at most `ms`) while a human holds the desktop: "free" when it wasn't held, "released" when it was handed back meanwhile, "held" when it still is. */
+	async free(ms = HOLD): Promise<"free" | "released" | "held"> {
 		const left = await this.#held();
-		if (!left) return false;
+		if (!left) return "free";
 		await new Promise<void>((ok) => {
 			const t = setTimeout(ok, Math.min(ms, left));
 			this.#waiters.push(() => { clearTimeout(t); ok(); });
 		});
-		return (await this.#held()) > 0;
+		return (await this.#held()) > 0 ? "held" : "released";
 	}
 
 	/** The live view: the browser's current tab, or undefined when the box or its browser isn't running. Never starts the box. */

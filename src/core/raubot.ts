@@ -417,7 +417,10 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				parameters: Type.Object({ code: Type.String({ description: "JavaScript, run as an async function body." }), timeout: Type.Optional(Type.Integer({ description: "Seconds, default 60, max 600." })) }),
 				execute: async ({ code, timeout }, api) => {
 					// A human took control of this desktop: wait for the hand back (their steer text arrives as a steer).
-					if (await ns.getByName(this.#boxOf(api.conversationId)).free(PAUSE)) return { content: [{ type: "text", text: "A human still has control of the desktop after a 5 minute wait. Don't use the browser; wait or ask them." }], isError: true };
+					const hold = await ns.getByName(this.#boxOf(api.conversationId)).free(PAUSE);
+					if (hold === "held") return { content: [{ type: "text", text: "A human still has control of the desktop after a 5 minute wait. Don't use the browser; wait or ask them." }], isError: true };
+					// The page changed under this call while the human drove, so it isn't run.
+					if (hold === "released") return { content: [{ type: "text", text: "Not run: a human had control of the desktop while this call waited and has handed it back. Check the page with a screenshot and follow their instructions before continuing." }], isError: true };
 					const env = await fx(Effect.flatMap(Secrets, (s) => s.env()));
 					const main = ns.getByName("main");
 					const jar = (await main.jar()) as Jar;
