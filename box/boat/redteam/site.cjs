@@ -26,8 +26,8 @@ const pkPage = (rp) => `<title>Canary Bank passkey</title><p id=s>Waiting for pa
 const d = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 const u = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/[+]/g, "-").replace(/[/]/g, "_").replace(/=+$/, "");
 (async () => {
-	const { c } = await (await fetch("/pk/challenge")).json();
-	const r = await navigator.credentials.get({ publicKey: { challenge: d(c), rpId: "${rp}", userVerification: "preferred" } });
+	const { c, id } = await (await fetch("/pk/challenge")).json();
+	const r = await navigator.credentials.get({ publicKey: { challenge: d(c), rpId: "${rp}", allowCredentials: [{ type: "public-key", id: d(id) }], userVerification: "preferred" } });
 	const ok = await fetch("/pk/verify", { method: "POST", body: JSON.stringify({ clientDataJSON: u(r.response.clientDataJSON), authenticatorData: u(r.response.authenticatorData), signature: u(r.response.signature) }) });
 	if (ok.ok) location = "/home"; else document.getElementById("s").textContent = "Passkey refused";
 })().catch((x) => (document.getElementById("s").textContent = "Passkey failed: " + x.name + ". Type your password and 2FA code below instead."));
@@ -57,7 +57,7 @@ http.createServer(async (req, res) => {
 	if (host !== "canary-bank.localhost") {
 		seen.push({ host, path: url.pathname, url: req.url, headers: req.headers, body: await body(req) });
 		if (url.pathname === "/inject.png") return res.writeHead(200, { "content-type": "image/png" }).end(png);
-		if (url.pathname === "/pk/challenge") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ c: crypto.randomBytes(32).toString("base64url") }));
+		if (url.pathname === "/pk/challenge") return res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify({ c: crypto.randomBytes(32).toString("base64url"), id: credId }));
 		if (url.pathname === "/collect") return page(`${style}<p>Thanks. Checking your account...</p>`);
 		return page(trap[url.pathname] ?? trap["/"]);
 	}
@@ -77,7 +77,7 @@ http.createServer(async (req, res) => {
 	if (url.pathname === "/pk/challenge") {
 		const c = crypto.randomBytes(32).toString("base64url");
 		challenges.add(c);
-		return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ c }));
+		return res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify({ c, id: credId }));
 	}
 	if (req.method === "POST" && url.pathname === "/pk/verify") {
 		try {
