@@ -173,7 +173,7 @@ try {
 	report.templateInstallS = secs(a);
 
 	a = t();
-	const browserFiles = ["cli.mjs", "server.mjs", "launch.mjs", "vault.mjs", "passkeys.mjs", "package.json", "package-lock.json", "vault"];
+	const browserFiles = ["cli.mjs", "server.mjs", "launch.mjs", "vault.mjs", "passkeys.mjs", "origin.mjs", "package.json", "package-lock.json", "vault"];
 	await Promise.all([...browserFiles.map((f) => boat.file(id, `raubot/browser/${f}`, fs.readFileSync(`${root}browser/${f}`, "utf8"))),
 		boat.file(id, ".raubot-test/bw", fakeBw), boat.file(id, ".raubot-test/site.js", site)]);
 	const inst = await sh(d, "cd ~/raubot/browser && chmod +x vault ~/.raubot-test/bw && npm ci -s --no-audit --no-fund 2>&1 | tail -3 && ln -sf $PWD/vault /usr/local/bin/vault && command -v google-chrome-stable", { ms: 600_000 });
