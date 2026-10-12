@@ -44,7 +44,15 @@ http.createServer(async (req, res) => {
 		if (req.url === "/health") return json(200, { ok: true });
 		const want = token();
 		if (!want || req.headers["x-raubot-token"] !== want) return json(401, { error: "unauthorized" });
-		if (req.method === "POST" && req.url === "/exec") return json(200, await run(JSON.parse((await body(req)).toString())));
+		if (req.method === "POST" && req.url === "/exec") {
+			const job = run(JSON.parse((await body(req)).toString()));
+			// Boat's proxy drops a response with no bytes for 100 s (524), so long commands send a space every 15 s. JSON.parse skips them.
+			res.writeHead(200, { "content-type": "application/json" });
+			const beat = setInterval(() => res.write(" "), 15_000);
+			const r = await job;
+			clearInterval(beat);
+			return res.end(JSON.stringify(r));
+		}
 		if (req.url === "/screen") {
 			const r = await fetch("http://127.0.0.1:8913/screen").catch(() => undefined);
 			if (r?.status !== 200) return json(204, {});
