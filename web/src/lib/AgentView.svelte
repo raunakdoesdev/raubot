@@ -4,6 +4,7 @@
 	import { Button } from "$lib/components/ui/button";
 	import * as Collapsible from "$lib/components/ui/collapsible";
 	import Header from "$lib/Header.svelte";
+	import Takeover from "$lib/Takeover.svelte";
 	import { md } from "$lib/md";
 	import ToolRow from "$lib/ToolRow.svelte";
 	import { fnv, summary, traces } from "$lib/traces.svelte";
@@ -88,14 +89,18 @@
 			if (at >= 0) pending[at].failed = String(e).slice(0, 160);
 		}
 	}
+	let taking = $state(false);
+	const handBack = async (steer: string) => { if (steer) { text = steer; await send(); } else taking = false; };
 	const key = (e: KeyboardEvent) => {
 		if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer:coarse)").matches) { e.preventDefault(); send(); }
 	};
 </script>
 
+{#if taking}<Takeover box={`agent-${id}`} onhandback={handBack} />{/if}
 <div class="flex h-dvh min-w-0 flex-1 flex-col overflow-hidden">
 	<Header title={`subagent #${id}`}>
 		{#snippet lead()}<Button variant="ghost" size="icon-sm" class="md:hidden" aria-label="menu" onclick={onmenu}><PanelLeft /></Button>{/snippet}
+		{#if agent?.computer}<Button variant="ghost" size="sm" onclick={() => (taking = true)}>Take control</Button>{/if}
 		<span class="truncate text-sm text-muted-foreground">{note || (agent ? `${agent.status}${agent.computer ? " · computer" : ""}` : "loading…")}</span>
 	</Header>
 

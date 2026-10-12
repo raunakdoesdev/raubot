@@ -44,7 +44,7 @@ import * as hb from "./heartbeat.ts";
 import { finals } from "./replies.ts";
 import * as voice from "./voice.ts";
 
-type Env = { SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
+type Env = { BOX_BACKEND?: string; SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
 
 type Services = Storage | Box | Jobs | JobHost | Secrets;
 type CronArgs = { add?: Partial<cron.Cron> & Pick<cron.Cron, "id" | "schedule" | "prompt">; remove?: string[]; run?: string };
@@ -97,6 +97,9 @@ export const markView = (mark: number) => (payload: unknown) => {
 /** OpenRouter runs web search server-side; the model calls it like any tool. */
 /** OpenRouter: server-side web search, and Anthropic first so every request of raubot and its subagents shares one prompt cache. */
 const withSearch = (provider: string, p: AnthropicPayload) => (provider === "openrouter" ? { ...p, tools: [...(p.tools ?? []), WEB_SEARCH], provider: { order: ["anthropic"], allow_fallbacks: true } } : p);
+
+/** How long a browser call waits for a human to hand the desktop back before it gives up. */
+const PAUSE = 5 * 60_000;
 
 export class Raubot extends DurableObject<Env> implements Core {
 	memory!: Memory;
@@ -413,6 +416,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				name: "browser", replay: "unsafe", description: BROWSER,
 				parameters: Type.Object({ code: Type.String({ description: "JavaScript, run as an async function body." }), timeout: Type.Optional(Type.Integer({ description: "Seconds, default 60, max 600." })) }),
 				execute: async ({ code, timeout }, api) => {
+					// A human took control of this desktop: wait for the hand back (their steer text arrives as a steer).
+					const hold = await ns.getByName(this.#boxOf(api.conversationId)).free(PAUSE);
+					if (hold === "held") return { content: [{ type: "text", text: "A human still has control of the desktop after a 5 minute wait. Don't use the browser; wait or ask them." }], isError: true };
+					// The page changed under this call while the human drove, so it isn't run.
+					if (hold === "released") return { content: [{ type: "text", text: "Not run: a human had control of the desktop while this call waited and has handed it back. Check the page with a screenshot and follow their instructions before continuing." }], isError: true };
 					const env = await fx(Effect.flatMap(Secrets, (s) => s.env()));
 					const main = ns.getByName("main");
 					const jar = (await main.jar()) as Jar;
@@ -672,7 +680,12 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		return r.answers.asks.noul > 0.5 && r.answers.about.choice === "other";
 	}
 
-	#boxOf(conv: unknown) { return conv === this.root.id ? "main" : `agent-${conv}`; }
+	/** On Boat a computer agent is raubot's buddy in its box: the same VM, disk and Chrome profile. Other subagents get their own box. */
+	#boxOf(conv: unknown) {
+		if (conv === this.root.id) return "main";
+		if (this.env.BOX_BACKEND === "boat" && this.ctx.storage.kv.get<AgentInfo>(`agentinfo:${conv}`)?.computer) return "main";
+		return `agent-${conv}`;
+	}
 
 	/** `tools.agent`: a child conversation keyed by the script's call id, so a thawed script finds it again. */
 	#agent(scope: string, caller: unknown, owner?: { api: ToolExecutionApi; ctx: Context }) {

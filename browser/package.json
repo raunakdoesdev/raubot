@@ -2,9 +2,12 @@
   "name": "raubot-browser",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node passkeys.test.mjs && node launch.test.mjs" },
+  "scripts": {
+    "test": "node passkeys.test.mjs && node origin.test.mjs && node version.test.mjs && node launch.test.mjs"
+  },
   "dependencies": {
     "@bitwarden/cli": "2026.9.1",
-    "playwright": "1.63.0"
+    "playwright": "1.63.0",
+    "tldts": "^6.1.86"
   }
 }

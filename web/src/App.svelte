@@ -6,6 +6,7 @@
 	import ToolRow from "$lib/ToolRow.svelte";
 	import { parseTool, traces } from "$lib/traces.svelte";
 	import Header from "$lib/Header.svelte";
+	import Takeover from "$lib/Takeover.svelte";
 	import SecretForm from "$lib/SecretForm.svelte";
 	import Sidebar from "$lib/Sidebar.svelte";
 	import AgentView from "$lib/AgentView.svelte";
@@ -167,12 +168,15 @@
 			return generic ? new File([f], `pasted-${stamp}${got.length > 1 ? `-${k + 1}` : ""}.${ext}`, { type: f.type }) : f;
 		}));
 	}
+	let taking = $state(false);
+	const handBack = (steer: string) => { if (steer) ws.send(JSON.stringify({ send: steer })); else taking = false; };
 	const key = (e: KeyboardEvent) => {
 		if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer:coarse)").matches) { e.preventDefault(); send(); }
 	};
 </script>
 
 <svelte:window ondragover={guard} ondrop={guard} />
+{#if taking}<Takeover box="main" onhandback={handBack} />{/if}
 <div class="flex h-dvh overflow-hidden">
 <Sidebar bind:selected bind:open={menu} />
 {#if selected}{#key selected}<AgentView id={selected} onmenu={() => (menu = true)} />{/key}{/if}
@@ -188,6 +192,7 @@
 	<Header>
 		{#snippet lead()}<Button variant="ghost" size="icon-sm" class="md:hidden" aria-label="menu" onclick={() => (menu = true)}><PanelLeft /></Button>{/snippet}
 		<span class="truncate text-sm text-muted-foreground">{status}</span>
+		<Button variant="ghost" size="sm" onclick={() => (taking = true)}>Take control</Button>
 		<Button href="/voice" variant="ghost" size="icon-sm" aria-label="voice"><Mic /></Button>
 		<Button href="/settings" variant="ghost" size="icon-sm" aria-label="settings"><Settings /></Button>
 	</Header>
