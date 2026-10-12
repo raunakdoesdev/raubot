@@ -63,7 +63,10 @@ try {
 	const grepped = needles.filter((n) => !n.b.includes(0x0a) && !n.b.includes(0x00));
 	const t = Date.now();
 	const files = (await sh("sudo", ["grep", "-rlaF", "-f", "-", "--exclude-dir=proc", "--exclude-dir=sys", "--exclude-dir=dev", "--exclude-dir=run", "/", ...["/dev/shm/raubot-browser.log", "/run/log/journal"].filter((f) => fs.existsSync(f))], grepped.map((n) => n.b.toString()).join("\n") + "\n")).split("\n").filter(Boolean);
-	report.files = { s: Math.round((Date.now() - t) / 1000), canaryFound: files.includes(CANARY), secretFiles: files.filter((f) => f !== CANARY) };
+	// Boat keeps its own copies of home files (e.g. under /var/lib/ascii-lazy), so look again for the real needles only.
+	const secrets = grepped.filter((n) => n.name !== "canary");
+	const secretFiles = files.length && secrets.length ? (await sh("sudo", ["grep", "-laF", "-f", "-", ...files], secrets.map((n) => n.b.toString()).join("\n") + "\n")).split("\n").filter(Boolean) : [];
+	report.files = { s: Math.round((Date.now() - t) / 1000), canaryFound: files.includes(CANARY), secretFiles };
 	if (!report.files.canaryFound || report.files.secretFiles.length) fail = true;
 	if (!filesOnly) {
 		const dev = (await sh("findmnt", ["-no", "SOURCE", "/"])).trim();
