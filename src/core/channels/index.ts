@@ -29,11 +29,11 @@ export interface Channel {
 	react?(m: Inbound, emoji: string): Effect.Effect<void, ChannelError, Box>;
 }
 
-export type ChannelEnv = { SPECTRUM_WEBHOOK_SECRET: string; OPENAI_API_KEY: string };
+export type ChannelEnv = { SPECTRUM_WEBHOOK_SECRET: string; OPENAI_API_KEY: string; R2_ACCESS_KEY_ID?: string; R2_SECRET_ACCESS_KEY?: string };
 export type Channels = Readonly<Record<string, Channel>>;
 
 export const channels = (env: ChannelEnv): Channels =>
-	Object.fromEntries([imessage(env.SPECTRUM_WEBHOOK_SECRET, env.OPENAI_API_KEY)].map((c) => [c.name, c]));
+	Object.fromEntries([imessage(env.SPECTRUM_WEBHOOK_SECRET, env.OPENAI_API_KEY, env.R2_SECRET_ACCESS_KEY ? { R2_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID!, R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY } : {})].map((c) => [c.name, c]));
 
 /** What the model sees: the app's messages as typed, others tagged with their channel. */
 export const tag = (from: Origin, text: string) => (from.channel === APP.channel ? text : `[via ${from.channel}] ${text}`);
@@ -50,6 +50,7 @@ export const send = (cs: Channels, to: Origin, text: string, files?: string[]) =
 
 export const channelDoc = (cs: Channels) =>
 	[`Messages starting with "[via <channel>]" came from that channel instead of this app, and your final reply is sent back there.`,
+		`The user can text "undo" (or "delete last") to hide his last message and everything after it from your memory, and "restore" to bring back the last hidden group; the app has the same on each of his messages. You never see these commands. A turn the model refuses is hidden this way on its own, and he is told so.`,
 		...Object.values(cs).map((c) => `"[via ${c.name}]": ${c.style}`)].join("\n");
 
 const REACTIONS = {

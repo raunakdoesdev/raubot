@@ -5,6 +5,7 @@ import wasm from "quickjs-wasi/quickjs.wasm";
 import { renderToolSample, toCodemodeIdentifier } from "@earendil-works/pi-codemode/declarations";
 import { parseCodemodeSource } from "@earendil-works/pi-codemode/source";
 import { PRELUDE_SOURCE } from "../../node_modules/@earendil-works/pi-codemode/dist/runtime/prelude-source.js";
+import { SCRIPT_MAX_MS } from "./agents.ts";
 
 /** `call` is the script's call id: stable across a snapshot restore, so a tool can key durable work on it. */
 export type Nested = { name: string; description: string; inputSchema: object; execute: (args: never, call: number) => Promise<unknown> };
@@ -17,7 +18,7 @@ export const describe = (tools: Nested[]) => `Run JavaScript that calls other to
 - \`await tools.<name>({ ...args })\` resolves to the tool's text output and rejects with an Error on failure.
 - \`text(value)\`, \`console.log(...)\` and \`return\` add output. \`image(dataUrlOrBlock)\` adds an image you will see, e.g. \`image(await tools.read({ path: "x.png" }))\`. \`notify(text)\` shows a progress line in the app's live trace only. \`exit()\` ends the script. Output over ${OUT_CAP / 1000}k chars is cut in the middle: print summaries, or write big data to a file and page it with tools.read. \`store(key, value)\` / \`load(key)\` keep JSON values across calls. They are for small state (256 KB in all): write big data such as API dumps to files in /scratch with \`tools.bash\` instead.
 - Use it to batch independent calls (Promise.allSettled), chain them, or filter large output, instead of many separate tool calls.
-- Long work you don't need to wait on: pass \`background: { label, timeout }\` (timeout in seconds, required, max 86400) next to \`code\`. The call returns at once with a job id; the script keeps running, even across restarts, and when it ends its result comes back to you as a \`job\` message. \`tools.jobs()\` lists jobs, \`tools.jobs({ cancel: [id] })\` stops some, \`tools.jobs({ prune: true })\` forgets finished ones. At most 100 run at once.
+- Long work you don't need to wait on: pass \`background: { label, timeout }\` (timeout in seconds, required, max 86400) next to \`code\`. The call returns at once with a job id; the script keeps running, even across restarts, and when it ends its result comes back to you as a \`job\` message (a subagent's job reports to it while it still runs, else to raubot). \`tools.jobs()\` lists jobs, \`tools.jobs({ cancel: [id] })\` stops some, \`tools.jobs({ prune: true })\` forgets finished ones. At most 100 run at once.
 - Optional first line: \`// @options: {"timeout_ms": 60000}\`
 
 Nested tools:
@@ -68,11 +69,16 @@ const opts = (deadline: number, finished: () => boolean, signal?: AbortSignal) =
 	interruptHandler: () => finished() || Date.now() > deadline || !!signal?.aborted,
 });
 
+/** When a script started now times out: 120 s, or its `// @options` timeout_ms (at most SCRIPT_MAX_MS). */
+export const scriptDeadline = (source: string) => Date.now() + Math.min(parseCodemodeSource(source).options.timeoutMs ?? 120_000, SCRIPT_MAX_MS);
+
 /** Runs a script. With a freezer, the VM is snapshotted (at most once a second) while it waits on tools, and a rerun after a restart thaws it and re-issues only the calls still owed. */
 export async function codemode(source: string, nested: Nested[], store: Store, signal?: AbortSignal, app?: App, freezer?: Freezer, until?: number, hooks?: Hooks) {
 	const { code, options } = parseCodemodeSource(source);
 	const frozen = await freezer?.load();
-	const deadline = frozen?.deadline ?? until ?? Date.now() + Math.min(options.timeoutMs ?? 120_000, 600_000);
+	// A script whose deadline passed while frozen would only time out after restoring its whole VM.
+	if (frozen && Date.now() > frozen.deadline) return { text: "Script failed\nScript error: timed out (restarted after its deadline)", error: true };
+	const deadline = frozen?.deadline ?? until ?? scriptDeadline(source);
 	const byName = new Map(nested.map((t) => [t.name, t]));
 	byName.set("__sleep", { name: "__sleep", description: "", inputSchema: {}, execute: (({ ms }: { ms: number }) => new Promise((r) => setTimeout(() => r(true), Math.max(0, Math.min(ms, deadline - Date.now()))))) as Nested["execute"] });
 	byName.set("__notify", { name: "__notify", description: "", inputSchema: {}, execute: (async () => "ok") as Nested["execute"] });

@@ -1,0 +1,19 @@
+# Zero-secrets-at-rest check on a real Boat sandbox (box/boat/leaktest.mts). Needs the repo secret BOAT_API_KEY; fails if it's missing.
+name: boat-leaktest
+on:
+  pull_request:
+    paths: ["box/boat/**", "browser/**", "src/core/boat.ts", "src/core/box.ts"]
+  workflow_dispatch:
+jobs:
+  leaktest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci --no-audit --no-fund
+      - run: test -n "$BOAT_API_KEY" || { echo "::error::The BOAT_API_KEY Actions secret is not set on this repo"; exit 1; }
+        env: { BOAT_API_KEY: "${{ secrets.BOAT_API_KEY }}" }
+      - run: npm run boat:leaktest
+        env: { BOAT_API_KEY: "${{ secrets.BOAT_API_KEY }}" }

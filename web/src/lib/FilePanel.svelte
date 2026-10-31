@@ -1,143 +1,123 @@
 <script lang="ts">
-	import { tick } from "svelte";
-	import { ChevronRight, Download, ExternalLink, FileText, Folder, X } from "@lucide/svelte";
+	import { ChevronRight, Download, ExternalLink, FolderTree, MessageSquarePlus, Play, Search, Send, X } from "@lucide/svelte";
 	import { Button } from "$lib/components/ui/button";
-	import { doc, highlight, langOf } from "$lib/md";
-	import { closeFile, openFile, pageUrl, raw, resolve, viewer } from "$lib/files.svelte";
+	import BoxTree from "$lib/BoxTree.svelte";
+	import Preview from "$lib/Preview.svelte";
+	import { closeFile, openFile, pageUrl, raw, viewer } from "$lib/files.svelte";
 
-	type Entry = { name: string; dir: boolean; size: number; mtime: number };
-	type View =
-		| { kind: "loading" } | { kind: "error"; msg: string }
-		| { kind: "dir"; entries: Entry[]; total: number }
-		| { kind: "md"; html: string; size: number; cut: boolean }
-		| { kind: "text"; html: string; text: string; size: number; loaded: number; lang?: string }
-		| { kind: "image" } | { kind: "pdf" } | { kind: "html" } | { kind: "binary"; size: number };
+	/**
+	 * The right-hand file browser: one agent's whole box (tree + live preview), and a note box that sends feedback on the
+	 * open file straight to that agent (it reads it at its next step). Docked on wide screens, a sheet on phones.
+	 */
+	let { title = "" }: { title?: string } = $props();
 
-	const IMG = /\.(png|jpe?g|gif|webp|avif|svg)$/i, PDF = /\.pdf$/i, HTML = /\.x?html?$/i, MD = /\.(md|markdown|mdx)$/i;
-	const BIN = /\.(zip|gz|tgz|tar|bin|exe|so|dylib|wasm|woff2?|ttf|otf|mp[34]|mov|webm|docx?|xlsx?|pptx?|sqlite|db)$/i;
-	/** Markdown renders whole up to MD_MAX; text loads in CHUNK ranges. */
-	const MD_MAX = 2 * 2 ** 20, CHUNK = 256 * 1024;
-
-	let view = $state<View>({ kind: "loading" }), body: HTMLElement | undefined = $state();
-	let seq = 0;
-	const path = $derived(viewer.path);
+	const box = $derived(viewer.box), path = $derived(viewer.path);
+	const isDir = $derived(!!path && path.endsWith("/"));
 	const name = $derived(path?.split("/").filter(Boolean).pop() ?? "");
 	const crumbs = $derived.by(() => {
 		const parts = (path ?? "").split("/").filter(Boolean);
-		return parts.map((p, i) => ({ name: p, path: "/" + parts.slice(0, i + 1).join("/") }));
+		return [{ name: "/", path: "/" }, ...parts.map((p, i) => ({ name: p, path: "/" + parts.slice(0, i + 1).join("/") + (i < parts.length - 1 || isDir ? "/" : "") }))];
 	});
-	const size = (n: number) => (n < 1024 ? n + " B" : n < 2 ** 20 ? (n / 1024).toFixed(1) + " KB" : (n / 2 ** 20).toFixed(1) + " MB");
 
-	async function fetchRange(p: string, offset: number, length: number) {
-		const r = await fetch(raw(p, "&offset=" + offset + "&length=" + length));
-		if (!r.ok) throw new Error(r.status === 403 ? "This file isn't viewable (outside the allowed folders or blocked)." : r.status === 404 ? "Not found." : await r.text());
-		return { bytes: new Uint8Array(await r.arrayBuffer()), size: Number(r.headers.get("x-file-size") ?? 0) };
-	}
-	const looksBinary = (b: Uint8Array) => b.subarray(0, 4096).includes(0);
+	let live = $state(true), err = $state(""), version = $state("");
+	let treeRef: BoxTree | undefined = $state();
+	const changed = (p: string, v: string) => { if (p === path?.replace(/\/$/, "")) version = v; };
+	$effect(() => { void path; version = ""; });
 
-	async function load(p: string) {
-		const my = ++seq;
-		view = { kind: "loading" };
+	// Width: draggable, remembered.
+	let width = $state(Number(localStorage.getItem("raubot:files:w")) || 760), drag = false;
+	const down = (e: PointerEvent) => { drag = true; (e.target as Element).setPointerCapture(e.pointerId); };
+	const move = (e: PointerEvent) => { if (drag) width = Math.max(380, Math.min(innerWidth - 360, innerWidth - e.clientX)); };
+	const up = () => { if (drag) { drag = false; localStorage.setItem("raubot:files:w", String(Math.round(width))); } };
+
+	// Search across the box (server-side), from the open folder.
+	let q = $state(""), hits = $state<{ path: string; dir: boolean }[]>([]), searching = $state(false), partial = $state(false);
+	async function search() {
+		if (q.trim().length < 2 || !treeRef) { hits = []; return; }
+		searching = true;
 		try {
-			if (IMG.test(p)) return void (view = { kind: "image" });
-			if (PDF.test(p)) return void (view = { kind: "pdf" });
-			if (HTML.test(p)) return void (view = { kind: "html" });
-			// Folders: try listing first when the path has no extension.
-			if (!/\.[^/]+$/.test(p) || p.endsWith("/")) {
-				const r = await fetch("/files.json?path=" + encodeURIComponent(p.replace(/\/+$/, "")));
-				if (my !== seq) return;
-				if (r.ok) { const d = await r.json(); return void (view = { kind: "dir", entries: d.entries, total: d.total }); }
-				if (r.status !== 400) throw new Error(r.status === 403 ? "This folder isn't viewable." : r.status === 404 ? "Not found." : await r.text());
-			}
-			const md = MD.test(p);
-			const { bytes, size } = await fetchRange(p, 0, md ? MD_MAX : CHUNK);
-			if (my !== seq) return;
-			if (BIN.test(p) || looksBinary(bytes)) return void (view = { kind: "binary", size });
-			const text = new TextDecoder().decode(bytes);
-			if (md) {
-				view = { kind: "md", html: doc(text), size, cut: bytes.length < size };
-				await tick(); fixLinks(p);
-			} else {
-				const lang = langOf(p);
-				view = { kind: "text", text, html: highlight(text, lang), size, loaded: bytes.length, lang };
-			}
-		} catch (e) { if (my === seq) view = { kind: "error", msg: e instanceof Error ? e.message : String(e) }; }
+			const from = path ? (isDir ? path : path.replace(/[^/]*$/, "")) : "/workspace/";
+			const r = await treeRef.find(q.trim(), from.length > 1 ? from.replace(/\/$/, "") : "/");
+			hits = r.hits; partial = r.partial;
+		} catch (e) { err = String(e).slice(0, 160); } finally { searching = false; }
 	}
 
-	async function more() {
-		if (view.kind !== "text" || !path) return;
-		const v = view, { bytes } = await fetchRange(path, v.loaded, CHUNK);
-		const text = v.text + new TextDecoder().decode(bytes);
-		view = { ...v, text, html: highlight(text, v.lang), loaded: v.loaded + bytes.length };
+	// Feedback on the open file, to the agent working in this box.
+	let note = $state(""), sending = $state(false), sent = $state("");
+	async function feedback() {
+		if (!note.trim() || !path) return;
+		sending = true; sent = "";
+		try {
+			const r = await fetch("/feedback", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ box: String(box), path: path.replace(/\/$/, "") || "/", message: note.trim() }) });
+			if (!r.ok) throw new Error(await r.text());
+			const ok = (await r.json()).ok;
+			sent = ok === "steered" ? "Sent · it reads it at its next step" : ok === "asked" ? "Sent · started a follow-up" : "Sent to raubot";
+			note = "";
+		} catch (e) { sent = "Not sent: " + String(e).slice(0, 120); } finally { sending = false; }
 	}
-
-	/** Relative links open in the panel; relative images load from the box; external links open in a new tab. */
-	function fixLinks(p: string) {
-		if (!body) return;
-		for (const img of body.querySelectorAll("img")) {
-			const src = img.getAttribute("src") ?? "";
-			if (!/^(https?:|data:)/i.test(src)) img.src = raw(resolve(p, decodeURI(src)));
-			img.loading = "lazy";
-		}
-		for (const a of body.querySelectorAll("a[href]")) {
-			const href = a.getAttribute("href")!;
-			if (a.hasAttribute("data-file") || href.startsWith("#")) continue;
-			if (/^[a-z][a-z0-9+.-]*:/i.test(href)) { a.setAttribute("target", "_blank"); a.setAttribute("rel", "noopener noreferrer"); continue; }
-			const target = resolve(p, decodeURI(href.split("#")[0]));
-			a.setAttribute("data-file", target); a.setAttribute("href", "#file=" + encodeURIComponent(target));
-		}
-	}
-
-	$effect(() => { if (path) load(path); });
-	const esc = (e: KeyboardEvent) => { if (e.key === "Escape" && viewer.path) closeFile(); };
+	const noteKey = (e: KeyboardEvent) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); feedback(); } };
+	const esc = (e: KeyboardEvent) => { if (e.key === "Escape" && viewer.open && !(e.target as Element)?.closest?.("textarea,input")) closeFile(); };
+	const who = $derived(box ? `subagent #${box}` : "raubot");
 </script>
 
-<svelte:window onkeydown={esc} />
-{#if path}<button class="fixed inset-0 z-40 bg-black/40 lg:hidden" aria-label="close file" onclick={closeFile}></button>{/if}
-<aside class="fixed inset-y-0 right-0 z-50 flex w-full max-w-[min(100vw,52rem)] flex-col border-l bg-background pt-[env(safe-area-inset-top)] shadow-2xl transition-transform duration-200 sm:w-[min(92vw,52rem)] {path ? 'translate-x-0' : 'pointer-events-none translate-x-full'}" aria-hidden={!path}>
-	{#if path}
+<svelte:window onkeydown={esc} onpointermove={move} onpointerup={up} />
+{#if viewer.open}
+	<button class="fixed inset-0 z-40 bg-black/40 lg:hidden" aria-label="close files" onclick={closeFile}></button>
+	<aside class="fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l bg-background pt-[env(safe-area-inset-top)] shadow-2xl sm:w-[min(94vw,52rem)] lg:relative lg:z-auto lg:w-[var(--w)] lg:max-w-none lg:shrink-0 lg:shadow-none" style="--w: {width}px" aria-label="files">
+		<div class="absolute inset-y-0 -left-1 z-10 hidden w-2 cursor-col-resize hover:bg-primary/20 lg:block" role="separator" aria-orientation="vertical" onpointerdown={down}></div>
 		<header class="flex h-14 shrink-0 items-center gap-1 border-b px-3">
-			<FileText class="size-4 shrink-0 text-muted-foreground" />
-			<nav class="no-scrollbar flex min-w-0 flex-1 items-center overflow-x-auto text-sm whitespace-nowrap">
+			<FolderTree class="size-4 shrink-0 text-muted-foreground" />
+			<span class="shrink-0 text-sm font-medium" title={title}>{who}</span>
+			<nav class="no-scrollbar ml-1 flex min-w-0 flex-1 items-center overflow-x-auto text-sm whitespace-nowrap">
 				{#each crumbs as c, i (c.path)}
-					{#if i}<ChevronRight class="size-3 shrink-0 text-muted-foreground" />{/if}
-					{#if i === crumbs.length - 1}<span class="px-1 font-medium">{c.name}</span>
+					{#if i > 1}<ChevronRight class="size-3 shrink-0 text-muted-foreground" />{/if}
+					{#if i === crumbs.length - 1 && i}<span class="px-1 font-medium">{c.name}</span>
 					{:else}<button class="rounded px-1 text-muted-foreground hover:bg-accent hover:text-foreground" onclick={() => openFile(c.path)}>{c.name}</button>{/if}
 				{/each}
 			</nav>
-			{#if view.kind !== "dir"}
-				<Button variant="ghost" size="icon-sm" href={view.kind === "html" ? pageUrl(path) : raw(path)} target="_blank" aria-label="open raw" title={view.kind === "html" ? "Open full page" : "Open raw"}><ExternalLink /></Button>
+			<Button variant="ghost" size="icon-sm" aria-label={live ? "pause live updates" : "resume live updates"} title={live ? "Live: new files appear as the agent writes them (click to pause)" : "Paused (click for live)"} onclick={() => (live = !live)}>
+				{#if live}<span class="relative flex size-2"><span class="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-60"></span><span class="relative inline-flex size-2 rounded-full bg-emerald-400"></span></span>{:else}<Play />{/if}
+			</Button>
+			{#if path && !isDir}
+				<Button variant="ghost" size="icon-sm" href={/\.x?html?$/i.test(path) ? pageUrl(path) : raw(path)} target="_blank" aria-label="open raw" title="Open in a new tab"><ExternalLink /></Button>
 				<Button variant="ghost" size="icon-sm" href={raw(path, "&dl=1")} download={name} aria-label="download" title="Download"><Download /></Button>
 			{/if}
 			<Button variant="ghost" size="icon-sm" aria-label="close" title="Close (Esc)" onclick={closeFile}><X /></Button>
 		</header>
-		<div bind:this={body} class="flex-1 overflow-y-auto overscroll-contain">
-			{#if view.kind === "loading"}<div class="p-6 text-sm text-muted-foreground">loading…</div>
-			{:else if view.kind === "error"}<div class="p-6 text-sm text-destructive">{view.msg}</div>
-			{:else if view.kind === "md"}
-				<article class="doc mx-auto max-w-3xl px-6 py-8">{@html view.html}</article>
-				{#if view.cut}<div class="px-6 pb-8 text-sm text-muted-foreground">Showing the first {size(MD_MAX)} of {size(view.size)}. Download for the rest.</div>{/if}
-			{:else if view.kind === "text"}
-				<pre class="min-h-full p-4 font-mono text-xs leading-relaxed"><code class="hljs !bg-transparent !p-0">{@html view.html}</code></pre>
-				{#if view.loaded < view.size}<div class="px-4 pb-6"><Button variant="secondary" size="sm" onclick={more}>Load more ({size(view.loaded)} of {size(view.size)})</Button></div>{/if}
-			{:else if view.kind === "image"}<div class="flex min-h-full items-center justify-center p-4"><img src={raw(path)} alt={name} class="max-h-full max-w-full rounded" /></div>
-			{:else if view.kind === "pdf"}<iframe src={raw(path)} title={name} class="h-full w-full border-0 bg-white"></iframe>
-			{:else if view.kind === "html"}
-				<!-- No allow-same-origin: the page gets an opaque origin, so its JS can't reach the app's cookies, storage or API. -->
-				<iframe src={pageUrl(path)} title={name} sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-downloads" referrerpolicy="no-referrer" class="h-full w-full border-0 bg-white"></iframe>
-			{:else if view.kind === "binary"}<div class="p-6 text-sm text-muted-foreground">Binary file ({size(view.size)}). Use download.</div>
-			{:else if view.kind === "dir"}
-				<ul class="p-2 text-sm">
-					{#each view.entries as e (e.name)}
-						<li><button class="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left hover:bg-accent" onclick={() => openFile(path.replace(/\/+$/, "") + "/" + e.name + (e.dir ? "/" : ""))}>
-							{#if e.dir}<Folder class="size-4 shrink-0 text-muted-foreground" />{:else}<FileText class="size-4 shrink-0 text-muted-foreground" />{/if}
-							<span class="truncate">{e.name}</span>
-							<span class="ml-auto shrink-0 text-xs text-muted-foreground">{e.dir ? "" : size(e.size)}</span>
-						</button></li>
-					{:else}<li class="px-3 py-2 text-muted-foreground">empty</li>{/each}
-					{#if view.total > view.entries.length}<li class="px-3 py-2 text-xs text-muted-foreground">{view.total - view.entries.length} more not shown</li>{/if}
-				</ul>
-			{/if}
+		<div class="@container flex min-h-0 flex-1 flex-col">
+			<div class="flex min-h-0 flex-1 flex-col @[42rem]:flex-row">
+				<div class="flex h-[38%] min-h-0 shrink-0 flex-col border-b @[42rem]:h-auto @[42rem]:w-72 @[42rem]:border-r @[42rem]:border-b-0">
+					<form class="flex shrink-0 items-center gap-1 border-b px-2 py-1.5" onsubmit={(e) => { e.preventDefault(); search(); }}>
+						<Search class="size-3.5 shrink-0 text-muted-foreground" />
+						<input bind:value={q} placeholder="Search whole box from here (Enter)" class="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground" oninput={() => { if (!q) hits = []; }} />
+						{#if hits.length || searching}<button type="button" class="text-xs text-muted-foreground hover:text-foreground" onclick={() => { q = ""; hits = []; }}>{searching ? "…" : "clear"}</button>{/if}
+					</form>
+					{#if hits.length}
+						<ul class="max-h-48 shrink-0 overflow-y-auto border-b py-1 text-xs">
+							{#each hits as h (h.path)}<li><button class="block w-full truncate px-3 py-1 text-left font-mono hover:bg-accent" title={h.path} onclick={() => openFile(h.path + (h.dir ? "/" : ""))}>{h.path}{h.dir ? "/" : ""}</button></li>{/each}
+							{#if partial}<li class="px-3 py-1 text-muted-foreground">more matches not shown, narrow the search</li>{/if}
+						</ul>
+					{/if}
+					{#if err}<div class="shrink-0 px-3 py-1.5 text-xs text-destructive">{err}</div>{/if}
+					{#key box}<div class="min-h-0 flex-1"><BoxTree bind:this={treeRef} {box} selected={path} {live} onselect={(p) => openFile(p)} onchange={changed} onerror={(m) => (err = m)} /></div>{/key}
+				</div>
+				<div class="flex min-h-0 min-w-0 flex-1 flex-col">
+					<div class="min-h-0 flex-1">
+						{#if path}<Preview {path} {box} {version} onopen={(p) => openFile(p)} />
+						{:else}<div class="p-6 text-sm text-muted-foreground">Pick a file to preview it. Files update live while {who} works.</div>{/if}
+					</div>
+					{#if path}
+						<form class="shrink-0 border-t p-2" onsubmit={(e) => { e.preventDefault(); feedback(); }}>
+							<div class="flex items-end gap-1 rounded-xl border bg-card p-1.5 focus-within:ring-[3px] focus-within:ring-ring/30">
+								<MessageSquarePlus class="mb-1.5 ml-1 size-4 shrink-0 text-muted-foreground" />
+								<textarea bind:value={note} onkeydown={noteKey} rows="1" placeholder={`Feedback on ${name || "this folder"} for ${who}`} class="block max-h-32 min-h-8 w-full resize-y bg-transparent px-1.5 py-1 text-sm outline-none placeholder:text-muted-foreground"></textarea>
+								<Button type="submit" size="icon-sm" class="rounded-full" aria-label="send feedback" disabled={!note.trim() || sending}><Send /></Button>
+							</div>
+							{#if sent}<div class="px-2 pt-1 text-xs {sent.startsWith('Not') ? 'text-destructive' : 'text-muted-foreground'}">{sent}</div>{/if}
+						</form>
+					{/if}
+				</div>
+			</div>
 		</div>
-	{/if}
-</aside>
+	</aside>
+{/if}

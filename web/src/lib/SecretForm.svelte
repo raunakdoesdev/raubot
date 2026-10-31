@@ -6,7 +6,9 @@
 	import * as Select from "$lib/components/ui/select";
 	import { TTLS } from "../../../src/app/ttl.ts";
 
-	let { token, name, why }: { token: string; name: string; why: string } = $props();
+	let { token, name, why, signedIn: signedInProp = true }: { token: string; name: string; why: string; signedIn?: boolean } = $props();
+	let signedIn = $state(signedInProp);
+	const login = `/login?next=${encodeURIComponent(`/s/${token}`)}`;
 	let value = $state(""), ttl = $state("0"), saving = $state(false), saved = $state(false), dismissed = $state(false), error = $state("");
 	const label = $derived(TTLS.find(([, s]) => String(s) === ttl)?.[0]);
 
@@ -15,11 +17,11 @@
 		saving = true; error = "";
 		const r = await fetch(`/s/${token}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ value, ttl: Number(ttl) || undefined }) });
 		saving = false; value = "";
-		if (r.ok) saved = true; else error = await r.text();
+		if (r.ok) saved = true; else if (r.status === 403) { signedIn = false; error = "Sign in to save."; } else error = await r.text();
 	}
 	async function dismiss() {
 		const r = await fetch(`/s/${token}`, { method: "DELETE" });
-		if (r.ok) dismissed = true; else error = await r.text();
+		if (r.ok) dismissed = true; else if (r.status === 403) { signedIn = false; error = "Sign in to dismiss."; } else error = await r.text();
 	}
 </script>
 
@@ -38,6 +40,12 @@
 			<p class="text-sm text-muted-foreground">Dismissed.</p>
 		{:else if saved}
 			<p class="flex items-center gap-2 text-sm text-emerald-400"><Check class="size-4" />Saved. raubot can use it now.</p>
+		{:else if !signedIn}
+			<div class="flex flex-col gap-3">
+				<p class="text-sm text-muted-foreground">Sign in to raubot (Cloudflare Access) to save it. You'll come back here.</p>
+				<Button href={login} class="h-10">Sign in</Button>
+				{#if error}<p class="text-sm text-destructive">{error}</p>{/if}
+			</div>
 		{:else}
 			<form onsubmit={save} class="flex flex-col gap-3">
 				<Input type="password" bind:value placeholder="Paste the secret" autocomplete="off" required class="h-10 font-mono" />

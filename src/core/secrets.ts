@@ -27,14 +27,24 @@ export class Secrets extends Context.Tag("Secrets")<Secrets, {
 }>() {}
 
 const NAME = /^[A-Z_][A-Z0-9_]{0,63}$/;
-const ASK_TTL = 7 * 86_400_000;
+/** Secret links last an hour: the link skips Access, so it should be short-lived (saving still needs Access). */
+export const ASK_TTL = 3_600_000;
+/** Shorter values can't be scrubbed from output without mangling ordinary text, so they aren't accepted. */
+export const MIN_LEN = 4;
+/** Names of stored secrets that didn't decrypt, set by env() on its result (non-enumerable, so never exported to the box). */
+export const FAILED = Symbol.for("raubot.secrets.failed");
+/** A line for the model when some secrets didn't decrypt, else "". */
+export const failedNote = (env: Record<string, string>) => {
+	const f = (env as unknown as Record<symbol, string[] | undefined>)[FAILED];
+	return f?.length ? `\n[raubot: secret ${f.join(", ")} failed to decrypt (SECRETS_KEY changed?), so it's missing from env. Ask the user to set it again.]` : "";
+};
 const b64 = (b: ArrayBuffer | Uint8Array) => btoa(String.fromCharCode(...new Uint8Array(b)));
 const unb64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 const fail = (message: string, status = 400) => Effect.fail(new SecretError({ message, status }));
 
-/** Scrubs secret values out of text the model will read. */
+/** Scrubs secret values out of text the model will read. Values under MIN_LEN can't be stored (answer refuses them). */
 export const redact = (env: Record<string, string>, s: string) =>
-	Object.entries(env).filter(([, v]) => v.length >= 4).sort((a, b) => b[1].length - a[1].length)
+	Object.entries(env).filter(([, v]) => v.length >= MIN_LEN).sort((a, b) => b[1].length - a[1].length)
 		.reduce((out, [k, v]) => out.split(v).join(`[secret ${k}]`), s);
 
 export const SecretsLive = (rawKey: string) => Layer.effect(Secrets, Effect.gen(function* () {
@@ -62,6 +72,7 @@ export const SecretsLive = (rawKey: string) => Layer.effect(Secrets, Effect.gen(
 		answer: (token, value, ttl) => Effect.gen(function* () {
 			const a = yield* find(token);
 			if (!value) return yield* fail("Paste a value.");
+			if (value.length < MIN_LEN) return yield* fail(`That's too short for a secret (under ${MIN_LEN} characters): raubot couldn't keep it out of what it reads.`);
 			const iv = crypto.getRandomValues(new Uint8Array(12));
 			const data = yield* Effect.promise(() => crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: ad(a.name) }, key, new TextEncoder().encode(value)));
 			const s: Sealed = { name: a.name, why: a.why, set: Date.now(), expires: ttl ? Date.now() + ttl * 1000 : undefined, iv: b64(iv), data: b64(data) };
@@ -74,9 +85,13 @@ export const SecretsLive = (rawKey: string) => Layer.effect(Secrets, Effect.gen(
 		remove: (names) => Effect.asVoid(run(kv.delete(names.map((n) => `secret:${n}`)))),
 		env: () => Effect.flatMap(live, (all) => Effect.forEach(all, (s) => Effect.tryPromise(() =>
 			crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(s.iv), additionalData: ad(s.name) }, key, unb64(s.data))).pipe(
-			Effect.map((v) => [[s.name, new TextDecoder().decode(v)] as const]),
+			Effect.map((v): { name: string; value?: string } => ({ name: s.name, value: new TextDecoder().decode(v) })),
 			Effect.tapError(() => Effect.logWarning(`secret ${s.name} doesn't decrypt (SECRETS_KEY changed?)`)),
-			Effect.orElseSucceed(() => []),
-		))).pipe(Effect.map((e) => Object.fromEntries(e.flat()))),
+			Effect.orElseSucceed((): { name: string; value?: string } => ({ name: s.name })),
+		))).pipe(Effect.map((e) => {
+			const env: Record<string, string> = Object.fromEntries(e.filter((x) => x.value !== undefined).map((x) => [x.name, x.value!]));
+			Object.defineProperty(env, FAILED, { value: e.filter((x) => x.value === undefined).map((x) => x.name), enumerable: false });
+			return env;
+		})),
 	};
 }));

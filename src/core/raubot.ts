@@ -5,6 +5,8 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { MUSE, withMuseWonder } from "./muse.ts";
+import { MORPH, morphProvider } from "./morph.ts";
 import type { Message } from "@earendil-works/pi-ai";
 import {
 	type Conversation, type ConversationView, createRegistry, type Extension, defineExtension, defineTool, GenerationTask, Harness,
@@ -16,16 +18,20 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Memory, type Msg } from "./memory.ts";
-import { BROWSER, COMPUTER, CRONS, DEVIN, EXECUTOR, HEARTBEAT, MARKS, MASTER, SELF, SETTLE, VIEW, VIEW_DOC } from "./prompts.ts";
+import { BROWSER, COMPACTIONS, COMPUTER, CRONS, DEVIN, EXECUTOR, HEARTBEATS, HIGH, MASTER, SELF, SETTLE, VIEW_DOC } from "./prompts.ts";
+import { pieces } from "./pieces.ts";
+export { pieces };
 import { browse, responses, type Jar } from "./computer.ts";
 import { DoSqlite } from "./sql.ts";
 import type { Computer } from "./box.ts";
-import { type App, codemode, describe, type Freezer, type Nested } from "./codemode.ts";
+import { type App, codemode, describe, scriptDeadline, type Freezer, type Nested } from "./codemode.ts";
 import { Mcp } from "./mcp.ts";
 import { serve } from "../app/index.ts";
 import type { AgentLine, AgentRow, Core, CoreEvent } from "./api.ts";
-import { agent, agents, APPROVED, catalog, type AgentHost, type Info as AgentInfo } from "./agents.ts";
+import { agent, agents, APPROVED, BUILD_HEADER, buildOf, catalog, MAX_DEPTH, refuse, seen, watchdog, type AgentHost, type Info as AgentInfo, type Vm as AgentVm } from "./agents.ts";
 import { location } from "./channels/imessage.ts";
+import { Coalescer, joinParts } from "./channels/coalesce.ts";
+import { command, type Command, failure, type Failure, lastExchange, settle } from "./refusal.ts";
 import { APP, type ChannelEnv, channelDoc, type Channels, channels, type Origin, acknowledge, idle, send as deliver, tag, uploadName, uploads } from "./channels/index.ts";
 import * as frozen from "./freezer.ts";
 import { bash, Box, BoxLive, runner, Storage, write } from "./fx.ts";
@@ -33,18 +39,42 @@ import * as files from "./files.ts";
 import { MAX_BYTES, MAX_LINES } from "./files.ts";
 import { JobHost, Jobs, JobsLive } from "./jobs.ts";
 import { OAuth } from "./oauth.ts";
-import { redact, Secrets, SecretsLive } from "./secrets.ts";
+import { failedNote, redact, Secrets, SecretsLive } from "./secrets.ts";
 import { type TraceEvent, Tracer } from "./trace.ts";
 import * as cron from "./cron.ts";
+import * as web from "./search.ts";
 import * as devin from "./devin.ts";
+import * as hb from "./heartbeat.ts";
+import { finals } from "./replies.ts";
+import * as voice from "./voice.ts";
+import * as todos from "./todos.ts";
+import * as pair from "./pair.ts";
 
-type Env = { SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; COMPACT_MODEL: string; AI: Ai } & ChannelEnv;
+type MainModel = "default" | "morph";
+type Env = { COALESCE_GAP_MS?: string; COALESCE_MAX_MS?: string; BOX_BACKEND?: string; SECRETS_KEY: string; PUBLIC_URL: string; RAUBOT: DurableObjectNamespace<Raubot>; BOX: DurableObjectNamespace<Computer>; ARTIFACTS: Artifacts; OPENAI_API_KEY: string; ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; OPENROUTER_MUSE_KEY?: string; MORPH_API_KEY?: string; PAIR_CF_CLIENT_ID?: string; PAIR_CF_CLIENT_SECRET?: string; TODOS_APP_TOKEN?: string; PROVIDER: string; EXECUTOR_URL: string; MODEL: string; MAIN_MODEL?: string; COMPACT_MODEL: string; AI: Ai; VERSION?: WorkerVersionMetadata } & ChannelEnv;
 
 type Services = Storage | Box | Jobs | JobHost | Secrets;
 type CronArgs = { add?: Partial<cron.Cron> & Pick<cron.Cron, "id" | "schedule" | "prompt">; remove?: string[]; run?: string };
-type DevinArgs = { add?: { purpose: string; key?: string; session?: string }; link?: { key: string; session: string }; close?: string[]; all?: boolean; check?: boolean; report?: string; error?: string };
+type DevinArgs = { add?: { purpose: string; key?: string; session?: string }; link?: { key: string; session: string }; prompt?: string; close?: string[]; all?: boolean; check?: boolean; report?: string; error?: string };
+type HeartbeatArgs = { every?: string; activeHours?: { start: string; end: string; tz?: string }; ackMaxChars?: number; target?: "last" | "app" | "imessage"; pause?: boolean; run?: boolean };
+/** Buffered log line of a heartbeat turn, kept out of the log until the turn ends. */
+type Held = { kind: Msg["kind"]; text: string; date: number };
+/** The channel a turn's replies go to: `start` is the log index of its first message, `sent` the last reply delivered. */
+type Reply = Origin & { start: number; sent?: number };
+/** The heartbeat turn in flight: when it started, its due tasks and the digest cursor to commit if it succeeds. */
+type Beat = { at: number; tasks: string[]; cursor?: unknown };
+/** Messages from raubot's own machinery, not the user. */
+/** Channels Raunak types into himself: only these take owner commands (undo, restore). */
+const OWNER_CHANNELS = new Set([APP.channel, "imessage"]);
+const MACHINE = /^(\[via \w+\] )?\[(job \d+|agent \d+ stalled|secret \w+|cron [\w-]+|devin [\w-]+|heartbeat)[\] ]/;
 
 const SOL = { provider: "openai", modelId: "gpt-6.1-sol" };
+
+/** Model-call retries for every conversation: 8 tries, 5s doubling to 2 min (about 9 min in all), so a provider outage of a few minutes doesn't end a run. */
+const RETRY = { enabled: true, maxRetries: 8, baseDelayMs: 5000, maxAgentDelayMs: 120_000 };
+
+/** How often the stall watchdog looks at subagents. */
+const WATCH_EVERY = 60_000;
 
 /** Clef questions for a subagent reply: is it stopping for a confirmation, and would that be one of the two the user wants? */
 const CONFIRM = {
@@ -59,30 +89,23 @@ const CONFIRM = {
 const text = (c: unknown) =>
 	typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text).join("\n") : "";
 
-/** Cut the view at the last line end before each mark; every piece but the tail ends on a cache breakpoint. */
-export const pieces = (view: string) => {
-	const out: string[] = [];
-	let at = 0;
-	for (const mark of MARKS) {
-		if (mark >= view.length) break;
-		const cut = view.lastIndexOf("\n", mark) + 1;
-		if (cut > at) out.push(view.slice(at, (at = cut)));
-	}
-	return { out: [...out, view.slice(at)], marks: out.length };
-};
-
 type Block = { cache_control?: unknown };
 type AnthropicPayload = { system?: Block[] | string; tools?: Block[]; messages?: { role: string; content: Block[] | string }[] };
 
-/** Anthropic allows 4 breakpoints: the view's marks plus pi's request-end mark. System and tools sit inside the first view mark's prefix. */
+/** Anthropic marks: the system prompt (after tools, so it covers both), the view's last whole block, and pi's request-end mark. No 1h TTL. */
+/** OpenRouter Executor app's R2 account whose `spill` tool parks oversized app results in R2 (Executor moved from profiles to accountId). */
+const SPILL_ACCOUNT = "acc_46723c33-86d3-4467-a370-62684cd0d326";
 const WEB_SEARCH = { type: "openrouter:web_search", parameters: { max_results: 5 } } as unknown as Block;
 
-const markView = (marks: number) => (payload: unknown) => {
+export const markView = (mark: number) => (payload: unknown) => {
 	const p = payload as AnthropicPayload;
 	const first = p.messages?.find((m) => m.role === "user");
-	if (!marks || !first || typeof first.content === "string") return undefined;
-	for (const b of [...(Array.isArray(p.system) ? p.system : []), ...(p.tools ?? [])]) delete b.cache_control;
-	for (const b of first.content.slice(0, marks)) b.cache_control = { type: "ephemeral" };
+	if (mark < 0 || !first || typeof first.content === "string" || !first.content[mark]) return undefined;
+	for (const b of p.tools ?? []) delete b.cache_control;
+	const sys = Array.isArray(p.system) ? p.system : [];
+	sys.forEach((b, k) => { if (k < sys.length - 1) delete b.cache_control; else b.cache_control = { type: "ephemeral" }; });
+	for (const b of first.content) delete b.cache_control;
+	first.content[mark].cache_control = { type: "ephemeral" };
 	return p;
 };
 
@@ -90,9 +113,17 @@ const markView = (marks: number) => (payload: unknown) => {
 /** OpenRouter: server-side web search, and Anthropic first so every request of raubot and its subagents shares one prompt cache. */
 const withSearch = (provider: string, p: AnthropicPayload) => (provider === "openrouter" ? { ...p, tools: [...(p.tools ?? []), WEB_SEARCH], provider: { order: ["anthropic"], allow_fallbacks: true } } : p);
 
+/** How long a browser call waits for a human to hand the desktop back before it gives up. */
+const PAUSE = 5 * 60_000;
+
 export class Raubot extends DurableObject<Env> implements Core {
+	/** Liveness check for the health cron. */
+	ping() { return Date.now(); }
+
 	memory!: Memory;
 	tracer!: Tracer;
+	todos!: todos.Todos;
+	pairing!: pair.Pairing;
 	oauth!: OAuth;
 	harness!: Harness;
 	root!: Conversation;
@@ -101,8 +132,12 @@ export class Raubot extends DurableObject<Env> implements Core {
 	#lock: Promise<unknown> = Promise.resolve();
 	#partial = "";
 	#steering = "[]";
+	/** Per conversation, the switches that move its running foreground scripts to background jobs. */
+	#scripts = new Map<string, Set<() => void>>();
 	#delivering = false;
-	#marks = 0;
+	#redeliver = false;
+	#marks = -1;
+	#compact: { system: string; tools: { name: string; description: string; parameters: never }[] } | undefined;
 	#prompt = "";
 	#fx!: <A, E>(e: Effect.Effect<A, E, Services>) => Promise<A>;
 	#channels!: Channels;
@@ -126,13 +161,28 @@ export class Raubot extends DurableObject<Env> implements Core {
 			execute: (args: Record<string, unknown>) => mcp.call(t.name, args),
 		}));
 		const ref = (path: string[]) => path.map((k) => (/^[A-Za-z_$][\w$]*$/.test(k) ? `.${k}` : `[${JSON.stringify(k)}]`)).join("");
+		// Executor cuts execute output at 64KB. A bigger result is parked in R2 by the OpenRouter app's `spill` tool inside the same execute (no second call), then fetched here whole.
+		const SPILL = `tools.openrouter.spill`;
 		const app: App = async (path, args) => {
-			const out = await mcp.call("execute", { code: `return await tools${ref(path)}(${JSON.stringify(args ?? {})});` });
+			const code = `const r = await tools${ref(path)}(${JSON.stringify(args ?? {})});
+const s = typeof r === "string" ? r : JSON.stringify(r);
+if (s === undefined || s.length <= 60000) return r;
+try { return { __spilled: await ${SPILL}({ accountId: ${JSON.stringify(SPILL_ACCOUNT)}, data: s }) }; } catch (e) { return { __spillError: String(e && e.message || e).slice(0, 1500), bytes: s.length }; }`;
+			const out = await mcp.call("execute", { code });
 			const r = JSON.parse(out);
 			if (r.status !== "completed") return out; // paused for approval: the agent shows it and resumes
-			const v = r.execution?.value;
+			let v = r.execution?.value;
+			if (v?.__spillError) throw new Error(`result too big (${v.bytes} bytes) and spill to R2 failed: ${v.__spillError}`);
+			if (v?.__spilled?.url) {
+				const res = await fetch(v.__spilled.url);
+				if (!res.ok) throw new Error(`spilled result fetch HTTP ${res.status}`);
+				const t = await res.text();
+				try { v = JSON.parse(t); } catch { v = t; }
+			}
 			if (!r.execution?.ok || v?.isError) throw new Error(JSON.stringify(r.execution?.error ?? v));
-			const res = v?.structuredContent?.result ?? v?.structuredContent ?? v?.content?.map((c: { text?: string }) => c.text).join("\n") ?? v;
+			// Text-only content joins to plain text; content with resources/images (e.g. slack_read_file's base64 blob) stays whole as JSON.
+			const content = v?.content as { type?: string; text?: string }[] | undefined;
+			const res = v?.structuredContent?.result ?? v?.structuredContent ?? (content?.every((c) => typeof c.text === "string") ? content.map((c) => c.text).join("\n") : content) ?? v;
 			return typeof res === "string" ? res : JSON.stringify(res);
 		};
 		return { nested, app };
@@ -140,21 +190,25 @@ export class Raubot extends DurableObject<Env> implements Core {
 
 	async #init() {
 		this.oauth = new OAuth(this.ctx.storage, this.env.EXECUTOR_URL);
+		this.todos = new todos.Todos(this.ctx.storage.sql);
+		this.pairing = new pair.Pairing(this.ctx.storage.sql);
+		this.todos.subscribe(() => this.#broadcast({ tasks: todos.view(this.todos) }));
 		this.#channels = channels(this.env);
+		for (const a of (await this.ctx.storage.list<AgentInfo>({ prefix: "agentinfo:" })).values()) if (a?.vm === "shared" && a.box) this.#shared.set(a.id, a.box);
 		// Live traces: only raubot's own scripts and its jobs stream to the main chat; a subagent's view polls /traces.json.
 		this.tracer = new Tracer(this.ctx.storage, (e) => { if (this.#mine(e.run.conv)) this.#broadcast({ trace: e } as CoreEvent & { trace: TraceEvent }); });
 		const host = Layer.succeed(JobHost, {
 			run: async (job, signal) => {
 				const store = (await this.ctx.storage.get<Record<string, unknown>>("codemode-store")) ?? {};
-				const freezer = this.#freezer(`job:${job.id}`);
+				const freezer = this.#freezer(job.freezer ?? `job:${job.id}`);
 				const t = this.tracer.begin(`job:${job.id}`, job.code, job.id);
 				let r;
-				try { r = await codemode(job.code, this.#tools(`job:${job.id}`), store, signal, this.#app, freezer, job.deadline, t.hooks); }
+				try { r = await codemode(job.code, this.#tools(`job:${job.id}`, undefined, job.by), store, signal, this.#app, freezer, job.deadline, t.hooks); }
 				finally { t.end(r?.error !== false); }
 				await freezer.clear();
 				return r;
 			},
-			bump: (from, text) => this.send(text, from),
+			bump: (from, text, by) => this.#bump(from, text, by),
 			note: (job, text) => this.#fx(cron.record(job.label.replace(/^cron /, ""), /^"?(SENT|SKIPPED|SILENT)/.exec(text)?.[1]?.toLowerCase() ?? "done")),
 			stopChildren: async (id) => {
 				for (const c of (await this.ctx.storage.list<number>({ prefix: `agent:job:${id}:` })).values()) await (await this.harness.conversation(c as never, C))?.abort(C);
@@ -165,21 +219,32 @@ export class Raubot extends DurableObject<Env> implements Core {
 		const models = createModels({ authContext: { env: async (n) => (this.env as unknown as Record<string, string>)[n], fileExists: async () => false } });
 		models.setProvider(openaiProvider());
 		models.setProvider(anthropicProvider());
-		models.setProvider(openrouterProvider());
+		models.setProvider(withMuseWonder(openrouterProvider()));
+		models.setProvider(morphProvider());
 		const stream = models.streamSimple.bind(models);
 		models.streamSimple = (model, context, options) =>
+			// Muse Wonder writers use their own key from a retention-on OpenRouter workspace (the main key's workspace enforces ZDR, which excludes Muse).
+			model.id === MUSE.modelId && this.env.OPENROUTER_MUSE_KEY ? stream(model, context, { ...options, apiKey: this.env.OPENROUTER_MUSE_KEY }) :
 			// One session id for raubot and its subagents: OpenRouter routes by it, so a new subagent lands on the provider that holds raubot's cached prefix.
 stream(model, context, model.api === "anthropic-messages" ? { ...options, sessionId: `raubot-${this.ctx.id}`, onPayload: (p: unknown) => withSearch(model.provider, markView(this.#marks)(p) ?? (p as AnthropicPayload)) }
 				: model.api === "openai-responses" ? { ...options, onPayload: responses } : options);
 		const compactor = models.getModel("openrouter", this.env.COMPACT_MODEL)!;
-		this.memory = new Memory(this.ctx.storage.sql, async (systemPrompt, prompt) => {
+		// A compaction is a call like a turn: same system prompt and tools (never called), then its <chat> view and its task (OptChat).
+		this.memory = new Memory(this.ctx.storage.sql, async (chat, task, started) => {
 			const t0 = Date.now();
-			const r = await models.completeSimple(compactor, { systemPrompt, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, {
+			const c = this.#compact;
+			if (!c) throw new Error("compactor not ready");
+			const messages = [{ role: "user" as const, content: [{ type: "text" as const, text: chat }, { type: "text" as const, text: task }], timestamp: Date.now() }];
+			const s = models.streamSimple(compactor, { systemPrompt: c.system, tools: c.tools, messages } as never, {
 				reasoning: "low", signal: AbortSignal.timeout(30_000),
-				// Fastest provider first, and fall back to Luna when GLM errors or is rate-limited.
-				onPayload: (p: unknown) => ({ ...(p as object), provider: { sort: "latency" }, models: [this.env.COMPACT_MODEL, "openai/gpt-6-luna"] }),
+				// Fastest provider first, and fall back to Luna when GLM errors or is rate-limited. Tools are there for the cache only.
+				onPayload: (p: unknown) => ({ ...(p as object), tool_choice: "none", provider: { sort: "latency" }, models: [this.env.COMPACT_MODEL, "openai/gpt-6-luna"] }),
 			});
-			console.log("compact call", JSON.stringify({ ms: Date.now() - t0, bytes: prompt.length, stop: r.stopReason, ...r.usage, cost: r.usage.cost?.total }));
+			for await (const e of s) { started(); if (e.type === "done" || e.type === "error") break; }
+			const r = await s.result();
+			console.log("compact call", JSON.stringify({ ms: Date.now() - t0, bytes: chat.length, retry: task.includes("\n\nToo long: "), stop: r.stopReason, ...r.usage, cost: r.usage.cost?.total }));
+			// A refusal is the input's doing (asked again it refuses alike): no line, so Memory keeps the source clipped.
+			if (failure(r)?.kind === "refusal") return "";
 			if (r.stopReason === "error" || r.stopReason === "aborted") throw new Error(r.errorMessage ?? r.stopReason);
 			return text(r.content);
 		}, () => this.#changed());
@@ -197,7 +262,7 @@ stream(model, context, model.api === "anthropic-messages" ? { ...options, sessio
 					const c = cmd ?? command;
 					if (typeof c !== "string") return yield* Effect.fail(new Error("bash needs cmd (or command)"));
 					const env = yield* Effect.flatMap(Secrets, (s) => s.env());
-					return redact(env, yield* bash(c, Math.min(timeout ?? 120, 900), env));
+					return redact(env, yield* bash(c, Math.min(timeout ?? 120, 900), env)) + failedNote(env);
 				}).pipe(Effect.provide(BoxLive(ns, box)))),
 			},
 			{
@@ -241,9 +306,12 @@ stream(model, context, model.api === "anthropic-messages" ? { ...options, sessio
 			},
 			{
 				name: "zoom",
-				description: "Look closer at messages id..id+n-1: n>1 gives the two half summaries, n=1 the full original message.",
-				inputSchema: Type.Object({ id: Type.Integer(), n: Type.Integer() }),
-				execute: async ({ id, n }: { id: number; n: number }) => memory.zoom(id, n),
+				description: "Look closer at messages id..id+n-1: n>1 gives the two half summaries, n=1 the full original message, in pages of 30k characters from character at (it says where to go on). An \"[image <hash> <type>]\" marker in a message: zoom({ image: hash }) gives that image (pass it to image(...) to see it).",
+				inputSchema: Type.Object({ id: Type.Optional(Type.Integer()), n: Type.Optional(Type.Integer()), at: Type.Optional(Type.Integer()), image: Type.Optional(Type.String()) }),
+				execute: async ({ id, n = 1, at = 0, image }: { id?: number; n?: number; at?: number; image?: string }) => {
+					if (image !== undefined) { const img = memory.image(image); return img ? { type: "image", ...img } : `error: no image ${image}`; }
+					return memory.zoom(id ?? -1, n, at);
+				},
 			},
 			{
 				name: "date",
@@ -273,6 +341,18 @@ Example: find the Slack messages that need the user's attention.
 				execute: async ({ state, questions, model = "clef-flash" }: { state: unknown; questions: Record<string, unknown>; model?: string }) =>
 					JSON.stringify(await this.env.AI.run(`@cf/cloudflare/${model}` as keyof AiModels, { model, state, questions } as never)),
 			},
+			{
+				name: "web_search",
+				description: web.DESCRIPTION,
+				inputSchema: Type.Object({ query: Type.String(), max_results: Type.Optional(Type.Integer()) }),
+				execute: ({ query, max_results }: { query: string; max_results?: number }) => web.search(this.env.OPENROUTER_API_KEY, query, max_results),
+			},
+			{
+				name: "openrouter_web_search",
+				description: "Alias of web_search.",
+				inputSchema: Type.Object({ query: Type.String(), max_results: Type.Optional(Type.Integer()) }),
+				execute: ({ query, max_results }: { query: string; max_results?: number }) => web.search(this.env.OPENROUTER_API_KEY, query, max_results),
+			},
 			...executor.nested,
 		];
 		const messageDoc: Nested = {
@@ -294,13 +374,32 @@ Example: find the Slack messages that need the user's attention.
 			execute: (args: CronArgs) => this.#crons(args),
 		};
 		nested.push(messageDoc, cronsDoc, {
+			name: "todos",
+			description: todos.TOOL_DOC,
+			inputSchema: Type.Object({
+				add: Type.Optional(Type.Array(Type.Object({}, { additionalProperties: true }))),
+				update: Type.Optional(Type.Array(Type.Object({ id: Type.String() }, { additionalProperties: true }))),
+				list: Type.Optional(Type.Object({ tab: Type.Optional(Type.Union([Type.Literal("active"), Type.Literal("up_next")])), state: Type.Optional(Type.Array(Type.String())), all: Type.Optional(Type.Boolean()) })),
+			}),
+			execute: async (args: todos.ToolArgs) => todos.runTool(this.todos, args),
+		}, {
+			name: "heartbeat",
+			description: `Your heartbeat (see Heartbeats): no args shows its config and state { every, activeHours, ackMaxChars, target, paused, lastFire, nextDue, last, tasks }. Set every (e.g. "30m", "2h"), activeHours { start: "07:00", end: "23:00", tz? }, ackMaxChars, target ("last", "app" or "imessage"), pause (true/false). run: true fires one heartbeat as soon as you're idle (ignores active hours and pause).`,
+			inputSchema: Type.Object({
+				every: Type.Optional(Type.String()), activeHours: Type.Optional(Type.Object({ start: Type.String(), end: Type.String(), tz: Type.Optional(Type.String()) })),
+				ackMaxChars: Type.Optional(Type.Integer()), target: Type.Optional(Type.Union([Type.Literal("last"), Type.Literal("app"), Type.Literal("imessage")])),
+				pause: Type.Optional(Type.Boolean()), run: Type.Optional(Type.Boolean()),
+			}),
+			execute: (args: HeartbeatArgs) => this.#heartbeat(args),
+		}, {
 			name: "devin_runs",
 			description: `Registry of Devin sessions you started, with signed callbacks: use it instead of waiting on devin_session_gather. No args lists open runs.
-\`add: { purpose, key?, session? }\` registers a run before you create the session and returns { key, prompt, curl }: append prompt to the Devin session's prompt (it holds a signed curl Devin runs when it finishes or gets blocked). \`link: { key, session }\` records the Devin session id after creating it. \`close: [key or session id]\` closes runs; \`all: true\` lists closed ones too; \`check: true\` runs the safety-net check now.
-A valid callback comes to you as a "[devin <id> done|blocked|failed]" message with Devin's summary. Every hour a safety net reads each open run's Devin status: finished-without-callback, blocked (waiting for user) and stuck (>24h) runs come the same way; finished ones close.`,
+\`add: { purpose, key?, session? }\` registers a run before you create the session and returns { key, prompt, curl }: append prompt to the Devin session's prompt (it holds a signed curl Devin runs when it finishes or gets blocked). \`link: { key, session }\` records the Devin session id after creating it. \`prompt: key or session id\` gives an open run's lines again (e.g. to message a running session the devin_image upload helper). \`close: [key or session id]\` closes runs; \`all: true\` lists closed ones too; \`check: true\` runs the safety-net check now.
+A valid callback comes to you as a "[devin <id> done|blocked|failed]" message with Devin's summary. Every hour a safety net reads each open run's Devin status: finished-without-callback, blocked (waiting for user) and stuck (>24h) runs come the same way; finished ones close. Screenshots the session uploaded with devin_image come attached to that message as "[attached: uploads/devin/...]" lines.`,
 			inputSchema: Type.Object({
 				add: Type.Optional(Type.Object({ purpose: Type.String(), key: Type.Optional(Type.String()), session: Type.Optional(Type.String()) })),
 				link: Type.Optional(Type.Object({ key: Type.String(), session: Type.String() })),
+				prompt: Type.Optional(Type.String({ description: "Run key or session id: gives its prompt lines (devin_done + devin_image) again." })),
 				close: Type.Optional(Type.Array(Type.String())),
 				all: Type.Optional(Type.Boolean()), check: Type.Optional(Type.Boolean()),
 				report: Type.Optional(Type.String({ description: "Internal: the safety net's devin_session_interact get output." })),
@@ -310,22 +409,27 @@ A valid callback comes to you as a "[devin <id> done|blocked|failed]" message wi
 		});
 		const agentDoc: Nested = {
 			name: "agent",
-			description: `Start a subagent on a task and get its result. It runs on your model with all your tools (except agent and agents), sees your current VIEW as context, and does only the task. Its work stays out of your memory. Run several with Promise.all.
-Each subagent has its own box, copied from your box's last snapshot (same files and installs), so they never collide. Its /workspace commits merge into workspace main when it replies, and show up in your /workspace on your next bash call; a conflict it can't fix stays on branch agent-<id>.
+			description: `Start a subagent on a task and get its result. Only in a background codemode job (\`background: { label, timeout }\`): a foreground script can't wait on a subagent and gets an error. Check or steer running subagents with tools.agents. It runs on your model with all your tools, sees your current VIEW as context, and does only the task. Its work stays out of your memory. Run several with Promise.all.
+vm picks where it runs. vm: "own" (default): its own box, copied from your box's last snapshot (same committed files and installs), so it never collides with you; its /workspace commits merge into workspace main when it replies, and show up in your /workspace on your next bash call; a conflict it can't fix stays on branch agent-<id>. Use it for isolation, parallel work that may touch the same files, and anything long.
+vm: "shared": it runs in YOUR box (raubot's, or the calling subagent's), so it sees your uncommitted files, running processes and installs, starts fast and has no branch or merge step: it writes your tree directly. Use it when the task needs your local state (an uncommitted project, a dev server, a local harness). Parallel shared agents write the same tree, so tell each one exactly which files it may write.
+A computer agent with vm: "shared" also shares your Chromium (tabs, desktop): one agent's page can hijack another's. Pass vm: "shared" with computer: true only when you mean it.
 With no schema it resolves to its reply as a string. With schema (a JSON Schema) it resolves to a parsed object matching it, for use in code.
-With computer: true it runs on GPT-6.1 Sol with a browser too: a real Chromium in its own box whose logins are shared with every box (a login or logout in one shows up in the others on their next browser call) and signs in with the user's Bitwarden passwords, TOTP codes and passkeys. Use it for anything done on a website.  A browser task takes minutes, longer than a foreground script may run, so start it in a background codemode job (timeout 1800) and steer or check it with tools.agents.
+With computer: true it runs on GPT-6.1 Sol with a browser too: a real Chromium in its own box whose logins are shared with every box (a login or logout in one shows up in the others on their next browser call) and signs in with the user's Bitwarden passwords, TOTP codes and passkeys. Use it for anything done on a website; a browser task takes minutes, so give its job a timeout of 1800.
+With writer: true it runs on Meta's Muse Wonder as a copy writer: no VIEW or memory, only bash/read/edit/write on your /workspace files. Give it everything it needs in the task (facts, audience, tone, file paths). Use it for any copy people other than the user will read; it writes files and its reply, never sends.
+Nesting: computer and writer agents can't start agents; other subagents can start them, and other subagents nest at most ${MAX_DEPTH} deep (you are depth 0).
 Example: const r = await tools.agent({ task: "Find every open PR in repo X that touches billing", schema: { type: "array", items: { type: "object", properties: { url: { type: "string" }, why: { type: "string" } }, required: ["url", "why"] } } });`,
-			inputSchema: Type.Object({ task: Type.String(), schema: Type.Optional(Type.Unknown()), computer: Type.Optional(Type.Boolean()) }),
+			inputSchema: Type.Object({ task: Type.String(), schema: Type.Optional(Type.Unknown()), computer: Type.Optional(Type.Boolean()), writer: Type.Optional(Type.Boolean()), vm: Type.Optional(Type.Union([Type.Literal("own"), Type.Literal("shared")])) }),
 			execute: () => Promise.reject(new Error("unbound")),
 		};
 		const agentsDoc: Nested = {
 			name: "agents",
-			description: `Your subagents, newest first: [{ id, task, computer, status: "running" | "idle", started, last }], last being the end of its latest output. Works across turns and from background jobs.
+			description: `Your subagents, newest first: [{ id, task, computer, writer, vm, box, build, stale?, status: "running" | "idle", started, lastProgress?, stalled?, last }], last being the end of its latest output, lastProgress when its conversation last moved, stalled (only when set) why it looks stuck; build is the raubot build that started it, and stale (only when set) says this raubot instance still runs an older build than the deployed one. Works across turns and from background jobs.
 \`send: { id, message }\` talks to one: a running subagent reads it at its next step (resolves at once); an idle one answers it as a follow-up and this resolves to its reply. \`stop: [ids]\` stops running ones.`,
 			inputSchema: Type.Object({ send: Type.Optional(Type.Object({ id: Type.Integer(), message: Type.String() })), stop: Type.Optional(Type.Array(Type.Integer())) }),
 			execute: () => Promise.reject(new Error("unbound")),
 		};
-		const system = `${MASTER}\n${channelDoc(this.#channels)}\n\n${VIEW_DOC}\n\n${SELF(this.env.PUBLIC_URL)}\n\n${CRONS}\n\n${DEVIN}${executor.app ? `\n\n${EXECUTOR}` : ""}`;
+		const master = this.env.MAIN_MODEL === MUSE.modelId ? MASTER.replace(/Any copy that people other than the user will read[^\n]*/, "Any copy that people other than the user will read (docs, emails, Slack posts, announcements, drafts sent as him) must be written by Muse Wonder. The main raubot thread runs on Muse Wonder, so write it yourself there; subagents on other models use tools.agent({ writer: true }).") : MASTER;
+		const system = `${master}\n${channelDoc(this.#channels)}\n${voice.STYLE}\n\n${VIEW_DOC}\n\n${SELF}\n\n${CRONS}\n\n${HEARTBEATS}\n\n${todos.PROMPT}\n\n${DEVIN}${executor.app ? `\n\n${EXECUTOR}` : ""}\n\n${COMPACTIONS}`;
 		nested.push(agentDoc, agentsDoc, {
 			name: "jobs",
 			description: "Your background jobs, newest first: { id, label, status, started, ended, deadline }. `cancel: [ids]` stops running ones (no result comes back); `prune: true` forgets finished ones.",
@@ -337,12 +441,21 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				return (yield* jobs.list()).reverse().map(({ code: _, from: __, ...j }) => j);
 			})),
 		});
+		const mainModelDoc: Nested = {
+			name: "main_model",
+			description: `The model of raubot's main thread (only the main thread can call this; subagents, writers and the compactor keep theirs). No args shows { model, default }. set: "morph" switches to Morph's abliterated DeepSeek V4.1 Flash (${MORPH.modelId}), "default" switches back to ${this.env.MAIN_MODEL || this.env.MODEL}. Takes effect from the next model call and survives restarts.`,
+			inputSchema: Type.Object({ set: Type.Optional(Type.Union([Type.Literal("morph"), Type.Literal("default")])) }),
+			execute: () => Promise.reject(new Error("unbound")),
+		};
+		nested.push(mainModelDoc);
 		const boxed = new Map<string, Map<string, Nested>>();
-		this.#tools = (scope, owner) => {
-			const box = owner ? this.#boxOf(owner.api.conversationId) : "main";
+		this.#tools = (scope, owner, by) => {
+			const caller = owner?.api.conversationId ?? by ?? this.root.id;
+			const box = this.#boxOf(caller);
 			const own = box === "main" ? undefined : boxed.get(box) ?? boxed.set(box, new Map(boxTools(box).map((t) => [t.name, t]))).get(box)!;
-			return nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(scope, owner) } : t === agentsDoc ? { ...t, execute: this.#agents(owner) } 
-				: t === messageDoc ? { ...t, execute: this.#message(owner?.api.conversationId === this.root.id) } : own?.get(t.name) ?? t));
+			return nested.map((t) => (t === agentDoc ? { ...t, execute: this.#agent(scope, caller, owner !== undefined) } : t === agentsDoc ? { ...t, execute: this.#agents() } 
+				: t === messageDoc ? { ...t, execute: this.#message(owner?.api.conversationId === this.root.id, box) }
+				: t === mainModelDoc ? { ...t, execute: this.#mainModel(caller === this.root.id) } : own?.get(t.name) ?? t));
 		};
 		this.#app = executor.app;
 		this.#prompt = `# System prompt\n\n${system}\n\n# codemode tool description\n\n${describe(nested)}\n`;
@@ -355,6 +468,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				name: "browser", replay: "unsafe", description: BROWSER,
 				parameters: Type.Object({ code: Type.String({ description: "JavaScript, run as an async function body." }), timeout: Type.Optional(Type.Integer({ description: "Seconds, default 60, max 600." })) }),
 				execute: async ({ code, timeout }, api) => {
+					// A human took control of this desktop: wait for the hand back (their steer text arrives as a steer).
+					const hold = await ns.getByName(this.#boxOf(api.conversationId)).free(PAUSE);
+					if (hold === "held") return { content: [{ type: "text", text: "A human still has control of the desktop after a 5 minute wait. Don't use the browser; wait or ask them." }], isError: true };
+					// The page changed under this call while the human drove, so it isn't run.
+					if (hold === "released") return { content: [{ type: "text", text: "Not run: a human had control of the desktop while this call waited and has handed it back. Check the page with a screenshot and follow their instructions before continuing." }], isError: true };
 					const env = await fx(Effect.flatMap(Secrets, (s) => s.env()));
 					const main = ns.getByName("main");
 					const jar = (await main.jar()) as Jar;
@@ -362,39 +480,77 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 					if (r.changed && Object.keys(r.changed).length) await main.jarPut(r.changed);
 					console.log("browser jar", JSON.stringify({ box: this.#boxOf(api.conversationId), jar: Object.keys(jar).length, changed: Object.keys(r.changed ?? {}) }));
 					return {
-						content: [{ type: "text", text: redact(env, `${r.out || "(no output)"}\n\ntabs (* is page):\n${r.tabs}`) }, ...r.images.map((data) => ({ type: "image" as const, mimeType: "image/jpeg", data }))],
+						content: [{ type: "text", text: redact(env, `${r.out || "(no output)"}\n\ntabs (* is page):\n${r.tabs}`) + failedNote(env) }, ...r.images.map((data) => ({ type: "image" as const, mimeType: "image/jpeg", data }))],
 						isError: r.error,
 					};
 				},
 			})],
 		});
 		registry.install(this.#computer);
+		// Writer agents: only file tools on their box, with no raubot extension (no VIEW, memory, codemode or agents).
+		const asTool = (t: Nested) => defineTool({
+			name: t.name, replay: "unsafe", description: t.description, parameters: t.inputSchema as never,
+			execute: async (args, api) => {
+				try {
+					const r = await (boxTools(this.#boxOf(api.conversationId)).find((b) => b.name === t.name)!.execute as (a: unknown, c: number) => Promise<unknown>)(args, 0);
+					if (r && typeof r === "object" && (r as { type?: string }).type === "image") {
+						const { data, mimeType } = r as { data: string; mimeType: string };
+						return { content: [{ type: "image" as const, data, mimeType }] };
+					}
+					return { content: [{ type: "text" as const, text: typeof r === "string" ? r : JSON.stringify(r) }] };
+				} catch (e) { return { content: [{ type: "text" as const, text: String(e) }], isError: true }; }
+			},
+		});
+		this.#writer = defineExtension({ name: "writer", sections: [], tools: boxTools("main").map(asTool) });
+		registry.install(this.#writer);
+		const codemodeParams = Type.Object({
+			code: Type.String({ description: "Raw JavaScript source." }),
+			background: Type.Optional(Type.Object({ label: Type.String(), timeout: Type.Integer({ description: "Seconds, max 86400." }) })),
+		});
+		this.#compact = { system, tools: [{ name: "codemode", description: describe(nested), parameters: codemodeParams as never }] };
 		const raubot = defineExtension({
 			name: "raubot",
 			sections: [section("raubot", () => system, { tag: false })],
 			tools: [defineTool({
 				name: "codemode", replay: "safe", description: describe(nested),
-				parameters: Type.Object({
-					code: Type.String({ description: "Raw JavaScript source." }),
-					background: Type.Optional(Type.Object({ label: Type.String(), timeout: Type.Integer({ description: "Seconds, max 86400." }) })),
-				}),
+				parameters: codemodeParams,
 				execute: async ({ code, background }, api, ctx) => {
 					if (background) {
-						if (api.conversationId !== this.root.id) throw new Error("Only raubot can start background jobs.");
+						// A subagent's job (e.g. a cron run waiting on a computer agent) reports back to it while it runs, else to raubot.
+						const by = api.conversationId === this.root.id ? undefined : api.conversationId as unknown as number;
 						const from = (await this.ctx.storage.get<Origin>("reply")) ?? APP;
 						const { label, timeout } = background;
-						const job = await this.#fx(Effect.flatMap(Jobs, (j) => j.start(code, label, timeout, { channel: from.channel, to: from.to })));
+						const job = await this.#fx(Effect.flatMap(Jobs, (j) => j.start(code, label, timeout, { channel: from.channel, to: from.to }, false, by)));
 						return { content: [{ type: "text", text: `Started job ${job.id} (${label}). Its result will come back to you as a job message.` }] };
 					}
 					const store = (await this.ctx.storage.get<Record<string, unknown>>("codemode-store")) ?? {};
 					const tools = this.#tools(String(api.taskId), { api, ctx });
 					const freezer = this.#freezer(String(api.taskId));
-					const t = this.tracer.begin(String(api.conversationId), code);
-					let r;
-					try { r = await codemode(code, tools, store, (ctx as { signal?: AbortSignal }).signal, executor.app, freezer, undefined, t.hooks); }
-					finally { t.end(r?.error !== false); }
-					await freezer.clear();
-					if (!r.error) await this.ctx.storage.put("codemode-store", store);
+					const conv = String(api.conversationId), until = scriptDeadline(code);
+					const t = this.tracer.begin(conv, code);
+					const ac = new AbortController();
+					let moved = false;
+					(ctx as { signal?: AbortSignal }).signal?.addEventListener("abort", () => { if (!moved) ac.abort(); });
+					const work = (async () => {
+						let r;
+						try { r = await codemode(code, tools, store, ac.signal, executor.app, freezer, until, t.hooks); }
+						finally { t.end(r?.error !== false); }
+						await freezer.clear();
+						if (!r.error) await this.ctx.storage.put("codemode-store", store);
+						return r;
+					})();
+					// A steer can't land until this call returns: on one, the script carries on as a background job.
+					const scripts = this.#scripts.get(conv) ?? this.#scripts.set(conv, new Set()).get(conv)!;
+					let move!: () => void;
+					const steered = new Promise<undefined>((res) => (move = () => { moved = true; res(undefined); }));
+					scripts.add(move);
+					const r = await Promise.race([work, steered]).finally(() => scripts.delete(move));
+					if (!r) {
+						const by = conv === String(this.root.id) ? undefined : api.conversationId as unknown as number;
+						const from = (await this.ctx.storage.get<Origin>("reply")) ?? APP;
+						const job = await this.#fx(Effect.flatMap(Jobs, (j) => j.adopt({ code, label: "script moved here by a new message", from: { channel: from.channel, to: from.to }, deadline: until, freezer: String(api.taskId), ...(by !== undefined && { by }) }, work, ac)));
+						return { content: [{ type: "text", text: `A new message came in, so this script moved to background job ${job.id} and keeps running. Its result will come back to you as a job message.` }] };
+					}
 					return { content: [{ type: "text" as const, text: r.text }, ...(r.images ?? []).map((i) => ({ type: "image" as const, ...i }))], isError: r.error };
 				},
 			})],
@@ -405,8 +561,8 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 					if (at < 0) return undefined;
 					const first = messages[at] as Extract<Message, { role: "user" }>;
 					const body = typeof first.content === "string" ? [{ type: "text" as const, text: first.content }] : first.content;
-					const { out, marks } = pieces(`<view>\n${memory.get("pinned") ?? ""}\n</view>\n\nNew message:\n`);
-					this.#marks = marks;
+					const { out, mark } = pieces(memory.get("pinned") ?? "");
+					this.#marks = mark;
 					return { messages: messages.with(at, { ...first, content: [...out.map((text) => ({ type: "text" as const, text })), ...body] }) };
 				},
 			})],
@@ -414,10 +570,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		registry.install(raubot);
 
 		const storage = await SqliteStorage.open(new DoSqlite(this.ctx.storage));
-		this.harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false }, steeringMode: "all", extensions: [raubot] } }, C);
+		this.harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false }, retry: RETRY, steeringMode: "all", extensions: [raubot] } }, C);
 		this.root = await this.harness.root(C, {
 			agent: { model: { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium" },
 		});
+		await this.#applyMainModel();
 		this.state = await this.root.viewState(C);
 		this.state.subscribe(async (view) => {
 			const msg = (view.docs["pi.live"] as { generation?: { message?: { content?: unknown } } } | undefined)?.generation?.message;
@@ -456,21 +613,41 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				fresh.push(...page.items);
 				cursor = page.next;
 			} while (cursor);
+			const beat = await this.ctx.storage.get<Beat>("hb-turn");
+			const held: Held[] = beat ? JSON.parse(this.memory.get("hb-held") ?? "[]") : [];
+			const log = (kind: Msg["kind"], body: string, date: number) => (beat ? void (body.trim() && held.push({ kind, text: body, date })) : this.#log(kind, body, date));
 			for (const e of fresh.filter((e) => e.id !== last).reverse()) {
 				for (const m of e.model ?? []) {
 					const date = m.timestamp ?? Date.now();
 					if (m.role === "assistant" && m.usage) this.#usage({ date, ...m.usage });
-					if (m.role === "user") { const t = text(m.content); this.#log(/^(\[via \w+\] )?\[devin [\w-]+ /.test(t) ? "devin" : /^(\[via \w+\] )?\[(job \d+|secret \w+|cron [\w-]+)[\] ]/.test(t) ? "job" : "user", t, date); }
-					else if (m.role === "toolResult") this.#log("echo", `${m.toolName}: ${text(m.content)}`, date);
+					// The harness retries a transient failure itself: only the run's last assistant message decides, once the run ends.
+					if (m.role === "assistant") { const f = failure(m); this.memory.set("failed", f ? JSON.stringify(f) : ""); }
+					if (m.role === "user") { const t = text(m.content); log(/^(\[via \w+\] )?\[devin [\w-]+ /.test(t) ? "devin" : /^(\[via \w+\] )?\[(job \d+|agent \d+ stalled|secret \w+|cron [\w-]+|heartbeat)[\] ]/.test(t) ? "job" : "user", t, date); }
+					else if (m.role === "toolResult") log("echo", `${m.toolName}: ${[text(m.content), ...(await this.#images(m.content))].filter(Boolean).join("\n")}`, date);
 					else for (const b of m.content) {
 						if (typeof b === "string") continue;
-						if (b.type === "text") this.#log("talk", b.text, date);
-						else if (b.type === "toolCall") this.#log("tool", `${b.name} ${JSON.stringify(b.arguments)}`, date);
+						if (b.type === "text") log("talk", b.text, date);
+						else if (b.type === "toolCall") log("tool", `${b.name} ${JSON.stringify(b.arguments)}`, date);
 					}
 				}
 				this.memory.set("entry", String(e.id));
-			}
+				}
+				if (beat) { this.memory.set("hb-held", JSON.stringify(held)); await this.#settleBeat(beat, held); }
+				const failed = this.memory.get("failed");
+				if (failed && !this.busy()) { this.memory.set("failed", ""); await this.#failed(JSON.parse(failed) as Failure, !!beat); }
 		});
+	}
+
+	/** A tool result's images, kept in memory by hash (zoom gives them back); their markers for the log. */
+	async #images(content: unknown) {
+		const out: string[] = [];
+		for (const b of Array.isArray(content) ? content : []) {
+			if (b?.type !== "image" || typeof b.data !== "string") continue;
+			const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(b.data)))].slice(0, 8).map((x) => x.toString(16).padStart(2, "0")).join("");
+			this.memory.putImage(hash, { mimeType: b.mimeType ?? "image/png", data: b.data });
+			out.push(`[image ${hash} ${b.mimeType ?? "image/png"}]`);
+		}
+		return out;
 	}
 
 	#log(kind: Msg["kind"], body: string, date: number) {
@@ -515,25 +692,33 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		const roots = [];
 		for (let l = 31, a = 0; l >= 0; l--) if (T & (1 << l)) { roots.push(part(l, a >> l)); a += 1 << l; }
 		return {
-			log: T, pending: m.pending(), bytes: new TextEncoder().encode(m.render()).length, budget: VIEW,
+			log: T, pending: m.pending(), bytes: new TextEncoder().encode(m.render()).length, budget: HIGH,
 			roots, view: m.view.map(([l, i]) => part(l, i)), usage: JSON.parse(m.get("usage") ?? "[]"),
 		};
 	}
 
-	/** Once the turn ends, its final reply goes back to the channel that started it. Stored, so a restart mid-turn still delivers. */
+	/** Final replies go back to the channel that started the turn: every reply the model finished before a newer message joined the turn, then the turn's last one. Stored, so a restart mid-turn still delivers; `sent` keeps them in order and never twice. */
 	async #deliver() {
-		const r = await this.ctx.storage.get<Origin & { start: number }>("reply");
-		const said = r && !this.busy() && this.memory.log.slice(r.start).filter((m) => m.kind === "talk").at(-1)?.text;
-		const reply = said && !cron.SILENT.test(said) ? said : undefined;
-		if (r && !reply && !this.busy() && this.memory.log.length > r.start + 1) { // ended silent
-			await this.ctx.storage.delete("reply");
-			await this.#fx(idle(this.#channels, r));
-		}
-		if (!r || !reply || this.#delivering) return;
+		if (this.#delivering) return void (this.#redeliver = true);
 		this.#delivering = true;
 		try {
-			await this.ctx.storage.delete("reply");
-			await this.#fx(deliver(this.#channels, r, reply));
+			do {
+				this.#redeliver = false;
+				const r = await this.ctx.storage.get<Reply>("reply");
+				if (!r) return;
+				const busy = this.busy();
+				const replies = finals(this.memory.log, r.start, r.sent ?? -1, !busy);
+				for (const { at, text: said } of replies) {
+					// Replies to voice inputs belong to the voice agent: never to iMessage or any channel.
+					const reply = !cron.SILENT.test(said) && !voice.ownedByVoice(this.memory.log, at) ? hb.scrub(said) || undefined : undefined;
+					await this.ctx.storage.put("reply", { ...r, sent: at }); // at most once, even across a restart
+					if (reply) await this.#fx(deliver(this.#channels, r, reply)).catch((e) => console.error("deliver", e));
+				}
+				if (!busy && (replies.length || this.memory.log.length > r.start + 1)) {
+					await this.ctx.storage.delete("reply");
+					if (!replies.length) await this.#fx(idle(this.#channels, r)); // ended silent (or already sent)
+				}
+			} while (this.#redeliver);
 		} finally { this.#delivering = false; }
 	}
 
@@ -548,48 +733,90 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		};
 	}
 
-	/** Subagents: a foreground call owns its children (Esc stops them); a background job's are ownerless. Computer ones run on GPT-6.1 Sol with the browser. */
-	#host(owner?: { api: ToolExecutionApi; ctx: Context }): AgentHost {
-		const ctx = owner?.ctx ?? C;
+	/** Subagents are ownerless: only background jobs start them, so no turn waits on one. Computer ones run on GPT-6.1 Sol with the browser. */
+	#host(): AgentHost {
 		const conv = async (id: number) => (await this.harness.conversation(id as never, C)) ?? Promise.reject(new Error(`No subagent ${id}.`));
-		const kind = (computer: boolean) => ({
-			// No instructions here: they'd join the system prompt and break the prefix cached with raubot's own turns. agents.ts puts them in the task.
-			model: computer ? SOL : { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium" as const,
-			...(computer ? { extensions: { add: [this.#computer] } } : {}),
-		});
+		const kind = (computer: boolean, writer = false) => writer
+			// A writer has only the writer extension: file tools, no VIEW (that hook is raubot's), no codemode, no agents.
+			? { model: MUSE, thinkingLevel: "medium" as const, extensions: [this.#writer] }
+			: {
+				// No instructions here: they'd join the system prompt and break the prefix cached with raubot's own turns. agents.ts puts them in the task.
+				model: computer ? SOL : { provider: this.env.PROVIDER, modelId: this.env.MODEL }, thinkingLevel: "medium" as const,
+				...(computer ? { extensions: { add: [this.#computer] } } : {}),
+			};
 		const host: AgentHost = {
-			create: async (computer) => (owner
-				? await owner.api.commit(async (tx) => {
-					const c = await tx.createConversation({ ownership: { kind: "task", taskId: owner.api.taskId } });
-					await configure(tx, c.id, kind(computer));
-					return c.id;
-				}, ctx)
-				: (await this.harness.createConversation({ ownership: { kind: "ownerless" }, agent: kind(computer) }, C)).id) as unknown as number,
+			create: async (computer, writer = false, box) => {
+				const id = (await this.harness.createConversation({ ownership: { kind: "ownerless" }, agent: kind(computer, writer) }, C)).id as unknown as number;
+				if (box) this.#shared.set(id, box);
+				return id;
+			},
 			ask: async (id, content, requestId) => {
-				const child = (owner ? await owner.api.conversation(id as never, ctx) : await this.harness.conversation(id as never, C))!;
-				await (await child.submit({ type: "input", content, requestId }, ctx)).wait(ctx);
+				const child = await conv(id);
+				await this.#arm(Date.now() + WATCH_EVERY);
+				await (await child.submit({ type: "input", content, requestId }, C)).wait(C);
+				// Whoever asked gets this outcome, errors included: the watchdog needn't report it again.
+				await this.#fx(seen(host, id)).catch((e) => console.error("seen", id, e));
 				const page = await (await conv(id)).entries({}, 3, undefined, C);
-				for (const e of page.items) for (const m of e.model ?? []) if (m.role === "assistant" && m.usage) console.log("agent usage", JSON.stringify({ agent: id, input: m.usage.input, cacheRead: m.usage.cacheRead, cacheWrite: m.usage.cacheWrite, output: m.usage.output }));
+				for (const e of page.items) for (const m of e.model ?? []) if (m.role === "assistant" && m.usage) console.log("agent usage", JSON.stringify({ agent: id, model: m.model, input: m.usage.input, cacheRead: m.usage.cacheRead, cacheWrite: m.usage.cacheWrite, output: m.usage.output }));
+				// A shared box is its caller's: its work is already in the caller's tree, and the caller's own save or merge carries it.
+				if (this.#shared.has(id)) return host.last(id);
 				// Its box's work goes into workspace main; on a conflict it gets two tries to fix it itself.
 				for (let k = 0; ; k++) {
 					const why = await this.env.BOX.getByName(this.#boxOf(id)).merge();
 					if (!why) { await this.env.BOX.getByName("main").pull(); return host.last(id); }
 					if (k === 2) return `${await host.last(id)}\n\n[subagent ${id}'s work couldn't be merged into /workspace; it's on branch ${this.#boxOf(id)}: ${why}]`;
-					await (await child.submit({ type: "input", content: `Your /workspace commits couldn't be merged into workspace main:\n${why}\nRun git rebase origin/main in /workspace, resolve the conflicts and commit, then give your result again exactly as before.`, requestId: `${requestId}:merge${k}` }, ctx)).wait(ctx);
+					await (await child.submit({ type: "input", content: `Your /workspace commits couldn't be merged into workspace main:\n${why}\nRun git rebase origin/main in /workspace, resolve the conflicts and commit, then give your result again exactly as before.`, requestId: `${requestId}:merge${k}` }, C)).wait(C);
 				}
 			},
 			last: async (id) => {
 				const page = await (await conv(id)).entries({}, 50, undefined, C);
-				for (const e of page.items) for (const m of [...(e.model ?? [])].reverse()) if (m.role === "assistant") { const t = text(m.content); if (t) return t; }
+				for (const e of page.items) for (const m of [...(e.model ?? [])].reverse()) if (m.role === "assistant") {
+					const t = text(m.content); if (t) return t;
+					// A failed model call has no text: surface its error instead of an empty reply.
+					if (m.stopReason === "error" && m.errorMessage) return `[subagent model error (${m.model}): ${m.errorMessage}]`;
+				}
 				return "";
 			},
 			running: async (id) => {
 				const s = await (await conv(id)).viewState(C);
 				try { return (s.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; } finally { s.dispose(); }
 			},
-			steer: async (id, message) => void (await (await conv(id)).submit({ type: "input", content: message, whenBusy: "steer" }, C)),
+			steer: async (id, message) => {
+				await (await conv(id)).submit({ type: "input", content: message, whenBusy: "steer" }, C);
+				// A steered run may have no job waiting on it: keep the watchdog awake.
+				await this.#arm(Date.now() + WATCH_EVERY);
+				for (const move of this.#scripts.get(String(id)) ?? []) move();
+			},
 			stop: async (id) => (await conv(id)).abort(C),
 			needless: (reply) => this.#needless(reply),
+			builds: () => ({ running: buildOf(this.env.VERSION), deployed: this.#deployed ?? buildOf(this.env.VERSION) }),
+			progress: async (id) => {
+				const c = await conv(id);
+				let at = 0, error: string | undefined;
+				const page = await c.entries({}, 20, undefined, C);
+				for (const e of page.items) {
+					const ms = e.model ?? [];
+					if (!ms.length) continue;
+					at = Math.max(...ms.map((m) => m.timestamp ?? 0));
+					const a = [...ms].reverse().find((m) => m.role === "assistant");
+					if (a?.role === "assistant" && a.stopReason === "error") error = a.errorMessage ?? "model error";
+					break;
+				}
+				const s = await c.viewState(C);
+				try {
+					const live = s.value.docs["pi.live"] as { run?: unknown; generation?: { retry?: { at: number } }; tools?: unknown[] } | undefined;
+					const retryAt = live?.generation?.retry?.at;
+					return { running: live?.run !== undefined, at, ...(error && { error }), ...(retryAt !== undefined && { retryAt }), tools: live?.tools?.length ?? 0 };
+				} finally { s.dispose(); }
+			},
+			notify: async (info, text) => {
+				if (info.parent !== undefined) {
+					try { if (await host.running(info.parent)) return void (await host.steer(info.parent, text)); }
+					catch (e) { console.error("stall notify parent", info.parent, e); }
+				}
+				// The app, not the user's phone: raubot decides whether he needs to hear it.
+				await this.send(text, APP);
+			},
 		};
 		return host;
 	}
@@ -599,24 +826,46 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		return r.answers.asks.noul > 0.5 && r.answers.about.choice === "other";
 	}
 
-	#boxOf(conv: unknown) { return conv === this.root.id ? "main" : `agent-${conv}`; }
+	/** By default a subagent gets its own box (agent-<id>) — its own Chromium and browser profile — forked from raubot's; raubot itself runs in "main". Browser logins still sync across boxes via the shared cookie jar (see the browser tool), but pages, tabs and desktops never do: a computer agent opening a page must not change what another agent (or raubot) sees. A vm: "shared" subagent runs in its caller's box instead, resolved when it was created, so a chain of shared agents ends at the first box that is its own. */
+	#boxOf(conv: unknown) {
+		if (conv === this.root.id) return "main";
+		return this.#shared.get(conv as number) ?? `agent-${conv}`;
+	}
+
+	/** vm: "shared" subagents and the box each runs in. */
+	#shared = new Map<number, string>();
+
+	/** The newest build the edge Worker has reported (BUILD_HEADER); unset until a request comes through it. */
+	#deployed: string | undefined;
 
 	/** `tools.agent`: a child conversation keyed by the script's call id, so a thawed script finds it again. */
-	#agent(scope: string, owner?: { api: ToolExecutionApi; ctx: Context }) {
-		const host = this.#host(owner);
-		return (args: { task: string; schema?: object; computer?: boolean }, call: number) => {
-			if (owner && owner.api.conversationId !== this.root.id) return Promise.reject(new Error("A subagent can't start subagents."));
-			return this.#fx(agent(host, `agent:${scope}:${call}`, args));
+	#agent(scope: string, caller: unknown, foreground: boolean) {
+		const host = this.#host();
+		return async (args: { task: string; schema?: object; computer?: boolean; writer?: boolean; vm?: AgentVm }, call: number) => {
+			if (foreground) throw new Error("tools.agent only runs in a background job: rerun this with codemode's background: { label, timeout }, then check or steer it with tools.agents.");
+			const id = caller as number;
+			const info = caller === this.root.id ? undefined : (await this.ctx.storage.get<AgentInfo>(`agentinfo:${id}`)) ?? { id, task: "", started: 0 };
+			const no = refuse(info, args.computer ?? false, args.writer ?? false);
+			if (no) throw new Error(no);
+			return this.#fx(agent(host, `agent:${scope}:${call}`, args, { depth: info ? (info.depth ?? 1) + 1 : 1, ...(info && { parent: id }), box: this.#boxOf(caller) }));
 		};
 	}
 
+	/** A job's result: to the subagent that started it while it still runs, else to raubot (noting whose it was). */
+	async #bump(from: Origin, text: string, by?: number) {
+		if (by !== undefined) {
+			const host = this.#host();
+			try { if (await host.running(by)) return void (await host.steer(by, text)); }
+			catch (e) { console.error("bump", by, e); }
+			text += `\n(This job was started by subagent ${by}, which has finished: act on it for the user if needed.)`;
+		}
+		return this.send(text, from);
+	}
+
 	/** `tools.agents`: raubot's view of every subagent, from any turn or job. */
-	#agents(owner?: { api: ToolExecutionApi; ctx: Context }) {
+	#agents() {
 		const host = this.#host();
-		return (args: { send?: { id: number; message: string }; stop?: number[] }) => {
-			if (owner && owner.api.conversationId !== this.root.id) return Promise.reject(new Error("Only raubot can talk to subagents."));
-			return this.#fx(agents(host, args));
-		};
+		return (args: { send?: { id: number; message: string }; stop?: number[] }) => this.#fx(agents(host, args));
 	}
 
 	/** App: subagents and jobs for the sidebar. */
@@ -634,7 +883,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		const agents = await Promise.all(infos.map(async (a): Promise<AgentRow> => {
 			const running = await within(host.running(a.id), 3000, false);
 			// Old rows can lack a task (launched with an undefined task) or a start time.
-			return { id: a.id, task: String(a.task ?? "(no task)").slice(0, 200), computer: a.computer ?? false, status: running ? "running" : "idle", started: iso(a.started) ?? new Date(0).toISOString(), last: "" };
+			return { id: a.id, task: String(a.task ?? "(no task)").slice(0, 200), computer: a.computer ?? false, writer: a.writer ?? false, status: running ? "running" : "idle", started: iso(a.started) ?? new Date(0).toISOString(), last: "" };
 		}));
 		return { agents, jobs };
 	}
@@ -642,7 +891,13 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	async #agentRow(info: AgentInfo): Promise<AgentRow> {
 		const host = this.#host();
 		const [running, last] = await Promise.all([host.running(info.id), host.last(info.id)]);
-		return { id: info.id, task: String(info.task ?? "(no task)"), computer: info.computer ?? false, status: running ? "running" : "idle", started: new Date(info.started || 0).toISOString(), last: String(last ?? "").slice(-600) };
+		return { id: info.id, task: String(info.task ?? "(no task)"), computer: info.computer ?? false, writer: info.writer ?? false, status: running ? "running" : "idle", started: new Date(info.started || 0).toISOString(), last: String(last ?? "").slice(-600) };
+	}
+
+	/** App: the box a subagent runs in, as stored when it was created. */
+	async agentBox(id: number) {
+		const info = await this.ctx.storage.get<AgentInfo>(`agentinfo:${id}`);
+		return info && (info.box ?? `agent-${id}`);
 	}
 
 	/** App: a subagent's transcript, its newest 200 entries oldest first. */
@@ -680,28 +935,98 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	}
 
 	#computer!: Extension;
+	#writer!: Extension;
 
-	#tools!: (scope: string, owner?: { api: ToolExecutionApi; ctx: Context }) => Nested[];
+	#tools!: (scope: string, owner?: { api: ToolExecutionApi; ctx: Context }, by?: number) => Nested[];
 	#app?: App;
 	busy() { return (this.state.value.docs["pi.live"] as { run?: unknown } | undefined)?.run !== undefined; }
 
 	/** Every message comes from a channel; non-app ones are tagged for the model and get the turn's reply. */
 	async send(input: string, from: Origin = APP, files: string[] = []) {
+		const c = !files.length && OWNER_CHANNELS.has(from.channel) ? command(input) : undefined;
+		if (c) return this.#command(c, from);
+		// The user's own messages set where heartbeat alerts go (target "last").
+		// Voice is internal: it never becomes where replies or alerts go.
+		const isVoice = from.channel === "voice";
+		if (!MACHINE.test(input) && !isVoice) await this.ctx.storage.put("last-from", from);
 		input = tag(from, [input, ...files.map((f) => `[attached: ${f}]`)].filter(Boolean).join("\n"));
-		if (from.channel !== APP.channel) {
-			await this.ctx.storage.put({ reply: { ...from, start: this.memory.log.length }, [`origin:${from.channel}`]: from });
+		if (from.channel !== APP.channel && !isVoice) {
+			// A message joining a turn keeps the earliest start, so replies to earlier messages in it still go out.
+			const prev = (this.busy() || (await this.#queued()).length) ? await this.ctx.storage.get<Reply>("reply") : undefined;
+			const reply: Reply = prev ? { ...from, start: prev.start, ...(prev.sent !== undefined && { sent: prev.sent }) } : { ...from, start: this.memory.log.length };
+			await this.ctx.storage.put({ reply, [`origin:${from.channel}`]: from });
 		}
-		if (this.busy()) return void (await this.root.submit({ type: "input", content: input, whenBusy: "steer" }, C));
+		if (this.busy()) return void (await this.#steer(input));
 		const queued = [...await this.#queued(), input];
 		await this.ctx.storage.put("inbox", queued);
 		this.#broadcast({ queued });
 		void this.#drain().catch((e) => this.#broadcast({ error: String(e) }));
 	}
 
+	#voice = new Map<string, { start: number; input: string; at: number }>();
+
+	/** Parts of one channel message (Photon delivers a long text, a link and a file as separate webhooks): one turn input once the sender pauses. */
+	#parts?: Coalescer<{ from: Origin; text: string; files: string[] }>;
+	get #coalesce() {
+		const ms = (v: string | undefined, d: number) => (v && Number.isFinite(Number(v)) ? Number(v) : d);
+		return (this.#parts ??= new Coalescer({
+			gap: ms(this.env.COALESCE_GAP_MS, 8_000), max: ms(this.env.COALESCE_MAX_MS, 30_000),
+			flush: (_, parts) => this.send(joinParts(parts), parts[0].from),
+		}));
+	}
+
+	/** Voice agent -> raubot: queue a "[via voice]" message and wait up to ms for raubot's reply (never delivered to a channel). */
+	async voiceAsk(message: string, ms = 20_000) {
+		const id = crypto.randomUUID().slice(0, 8);
+		const text = message.trim().slice(0, 4000);
+		this.#voice.set(id, { start: this.memory.log.length, input: `${voice.TAG} ${text}`, at: Date.now() });
+		for (const [k, v] of this.#voice) if (Date.now() - v.at > 3600_000) this.#voice.delete(k);
+		await this.send(text, { channel: "voice", to: "" });
+		return { id, ...(await this.voiceWait(id, ms)) };
+	}
+
+	async voiceWait(id: string, ms = 20_000): Promise<{ status: "done"; reply: string } | { status: "working"; steps: string[] } | { status: "unknown" }> {
+		const a = this.#voice.get(id);
+		if (!a) return { status: "unknown" };
+		const end = Date.now() + Math.min(ms, 25_000);
+		for (;;) {
+			const log = this.memory.log;
+			const r = voice.answer(log, a.start, a.input, !this.busy() && !(await this.#queued()).length);
+			if (r !== undefined) return { status: "done", reply: r || "(raubot finished without a spoken reply)" };
+			if (Date.now() >= end) return { status: "working", steps: voice.progress(log, Math.max(a.start, voice.landed(log, a.start, a.input))) };
+			await new Promise((res) => setTimeout(res, 600));
+		}
+	}
+
+	async voiceStatus() {
+		return { busy: this.busy(), queued: (await this.#queued()).length, steps: voice.progress(this.memory.log, this.memory.log.length - 8) };
+	}
+
+	/** An ephemeral OpenAI Realtime key for the browser (10 min); the API key never leaves the Worker. */
+	async voiceSession() {
+		const model = (this.env as { VOICE_MODEL?: string }).VOICE_MODEL || voice.DEFAULT_MODEL;
+		// Model must be on our key; never switch to another one silently.
+		const m = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(model)}`, { headers: { authorization: `Bearer ${this.env.OPENAI_API_KEY}` } });
+		if (!m.ok) throw new Error(`OpenAI model ${model} not available on our key (${m.status}). Not switching models.`);
+		const r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+			method: "POST", headers: { authorization: `Bearer ${this.env.OPENAI_API_KEY}`, "content-type": "application/json" },
+			body: JSON.stringify(voice.sessionConfig(model)),
+		});
+		const body = (await r.json().catch(() => ({}))) as { value?: string; expires_at?: number; error?: { message?: string } };
+		if (!r.ok || !body.value) throw new Error(`OpenAI realtime ${r.status}: ${body.error?.message ?? "no client secret"}`);
+		return { key: body.value, expires_at: body.expires_at, model };
+	}
+
 	/** Inputs pi holds for the running turn's next step: shown in the app until they land in the log. */
 	#steers(docs: Record<string, unknown>) {
 		const items = (docs["pi.inbox"] as { items?: { mode: string; content?: unknown }[] } | undefined)?.items ?? [];
 		return items.flatMap((x) => (x.mode === "write" ? [] : [text(x.content)]));
+	}
+
+	/** A steer lands at the next tool boundary: the running script moves to a background job so that boundary comes now. */
+	async #steer(input: string) {
+		await this.root.submit({ type: "input", content: input, whenBusy: "steer" }, C);
+		for (const move of this.#scripts.get(String(this.root.id)) ?? []) move();
 	}
 
 	async #queued() { return (await this.ctx.storage.get<string[]>("inbox")) ?? []; }
@@ -715,9 +1040,9 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				await Promise.race([this.memory.settle(), new Promise((r) => setTimeout(r, SETTLE))]);
 			}
 			const input = (await this.#queued()).join("\n\n");
-			if (this.busy()) await this.root.submit({ type: "input", content: input, whenBusy: "steer" }, C);
+			if (this.busy()) await this.#steer(input);
 			else {
-				this.memory.set("pinned", this.memory.render());
+				this.#begin();
 				await this.root.reset(undefined, C);
 				await this.root.submit({ type: "input", content: input }, C);
 			}
@@ -725,6 +1050,66 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			this.#broadcast({ queued: [] });
 		});
 		await this.#sync();
+	}
+
+	/** A run starts: pin the VIEW, and note where its messages begin (a refused run's are hidden from there). */
+	#begin() {
+		this.memory.set("pinned", this.memory.render());
+		this.memory.set("run-start", String(this.memory.log.length));
+		this.memory.set("failed", "");
+	}
+
+	/** A run ended without an answer: the user hears it where the turn came from. */
+	async #failed(f: Failure, heartbeat: boolean) {
+		const from = Number(this.memory.get("run-start") ?? this.memory.log.length);
+		const { say, log, hid } = settle(this.memory, f, from, heartbeat);
+		console.error("model failure", JSON.stringify({ ...f, hid, from }));
+		this.#log("job", log, Date.now());
+		if (hid) this.#broadcast({ reload: this.memory.log.slice(-200) });
+		const to = (await this.ctx.storage.get<Reply>("reply")) ?? (await this.ctx.storage.get<Origin>("last-from")) ?? APP;
+		await this.#tell(to, say);
+	}
+
+	/** A short note to the user on one channel, outside any turn (app: the status line). */
+	async #tell(to: Origin, t: string) {
+		if (to.channel === "voice") return;
+		if (to.channel === APP.channel) return void this.#broadcast({ error: t });
+		await this.#fx(deliver(this.#channels, to, t)).catch((e) => console.error("tell", e));
+	}
+
+	/** Owner commands ("undo" / "delete last", "restore"): change what raubot remembers; never logged, never seen by the model. */
+	async #command(c: Command, from: Origin) {
+		if (this.busy()) return this.#tell(from, `I'm mid-turn. Stop me first (app: the stop button), then say "${c}" again.`);
+		if (c === "undo") {
+			const ids = lastExchange(this.memory.log, new Set(this.memory.hidden().map((h) => h.i)));
+			const first = ids.length ? this.memory.log[ids[0]].text.replace(/^\[via \w+\] /, "").replace(/\s+/g, " ").slice(0, 60) : "";
+			if (!(await this.hide(ids))) return this.#tell(from, "Nothing to undo.");
+			return this.#tell(from, `Undone: "${first}" and what I did after it are out of my memory. Say "restore" to bring them back.`);
+		}
+		const back = await this.restore();
+		return this.#tell(from, back.length ? `Restored ${back.length} message${back.length > 1 ? "s" : ""} (#${back[0]}${back.length > 1 ? `-${back.at(-1)}` : ""}).` : "Nothing to restore.");
+	}
+
+	/** Hides messages from raubot's memory as one group (restorable); from undo or the app. */
+	async hide(ids: number[]) {
+		if (this.busy()) throw new Error("raubot is mid-turn: stop it first");
+		const ok = this.memory.hide(ids, "removed by Raunak") !== undefined;
+		if (ok) this.#broadcast({ reload: this.memory.log.slice(-200) });
+		return ok;
+	}
+
+	/** Brings back the latest hidden group; gives its message ids. */
+	async restore() {
+		const back = this.memory.restore();
+		if (back.length) this.#broadcast({ reload: this.memory.log.slice(-200) });
+		return back;
+	}
+
+	/** Rewrites one log message, for a leaked secret. */
+	async redact(i: number, text: string) {
+		const ok = this.memory.redact(i, text);
+		if (ok) this.#broadcast({ reload: this.memory.log.slice(-200) });
+		return ok;
 	}
 
 	/** Saves a file into the box's uploads folder and gives its path, for `send`'s `files`. */
@@ -795,7 +1180,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	async snapshot() {
 		const asks = (await this.#fx(Effect.flatMap(Secrets, (s) => s.asks()))).map(({ token, name, why }) => ({ token, name, why }));
-		return { history: this.memory.log.slice(-200), busy: this.busy(), pending: this.memory.pending(), asks, queued: await this.#queued(), steering: this.#steers(this.state.value.docs) };
+		return { history: this.memory.log.slice(-200), busy: this.busy(), pending: this.memory.pending(), asks, queued: await this.#queued(), steering: this.#steers(this.state.value.docs), tasks: todos.view(this.todos) };
 	}
 
 	stop() { return this.root.abort(C); }
@@ -835,7 +1220,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	/** One alarm serves memory, jobs and crons: set it to the earliest of `at` and the next cron, never later than one already set. */
 	async #arm(at = Infinity) {
-		const when = Math.min(at, await this.#fx(cron.wake), (await this.ctx.storage.get<number>("devin-next")) ?? Infinity);
+		const when = Math.min(at, await this.#fx(cron.wake), (await this.ctx.storage.get<number>("devin-next")) ?? Infinity, await this.#hbWake());
 		const set = await this.ctx.storage.getAlarm();
 		if (when < Infinity && (set === null || when < set)) await this.ctx.storage.setAlarm(Math.max(when, Date.now()));
 	}
@@ -844,8 +1229,21 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		this.memory.pump();
 		for (const c of await this.#fx(cron.due(Date.now()))) await this.#fire(c).catch((e) => this.#fx(cron.record(c.id, `failed to start: ${String(e).slice(0, 200)}`)));
 		await this.#devinTick().catch((e) => console.error("devin check", e));
-		const busy = (await this.#fx(Effect.flatMap(Jobs, (j) => j.resume()))) || this.memory.pending();
+		await this.#tick().catch((e) => console.error("heartbeat", e));
+		const watching = await this.#watch().catch((e) => { console.error("watchdog", e); return true; });
+		const jobs = await this.#fx(Effect.flatMap(Jobs, (j) => j.resume()));
+		const busy = watching || jobs || this.memory.pending();
 		await this.#arm(busy ? Date.now() + 30_000 : Infinity);
+	}
+
+	/** The subagent stall watchdog, at most once per WATCH_EVERY: true while any subagent still runs, so the alarm keeps coming back. */
+	async #watch() {
+		const next = (await this.ctx.storage.get<number>("watch-next")) ?? 0;
+		if (next > Date.now()) return (await this.ctx.storage.get<boolean>("watch-live")) ?? false;
+		await this.ctx.storage.put("watch-next", Date.now() + WATCH_EVERY);
+		const live = (await this.#fx(watchdog(this.#host()))) > 0;
+		await this.ctx.storage.put("watch-live", live);
+		return live;
 	}
 
 	/** Hourly while any Devin run is open: a quiet job reads their Devin status and reports through tools.devin_runs. */
@@ -860,19 +1258,20 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	}
 
 	/** Delivers Devin messages, one per channel they came from. */
-	async #devinSay(items: { run: devin.Run; text?: string }[]) {
-		const by = new Map<string, { from: Origin; lines: string[] }>();
-		for (const { run, text } of items) {
+	async #devinSay(items: { run: devin.Run; text?: string; images?: string[] }[]) {
+		const by = new Map<string, { from: Origin; lines: string[]; files: string[] }>();
+		for (const { run, text, images = [] } of items) {
 			if (!text) continue;
-			const k = JSON.stringify(run.from), g = by.get(k) ?? { from: run.from, lines: [] };
+			const k = JSON.stringify(run.from), g = by.get(k) ?? { from: run.from, lines: [], files: [] };
 			g.lines.push(text);
+			g.files.push(...images);
 			by.set(k, g);
 		}
-		for (const g of by.values()) await this.send(g.lines.join("\n\n"), g.from);
+		for (const g of by.values()) await this.send(g.lines.join("\n\n"), g.from, g.files);
 	}
 
 	/** \`tools.devin_runs\`. */
-	async #devin({ add, link, close = [], all, check, report, error }: DevinArgs) {
+	async #devin({ add, link, prompt, close = [], all, check, report, error }: DevinArgs) {
 		if (add) {
 			const from = (await this.ctx.storage.get<Origin>("reply")) ?? APP;
 			const r = await this.#fx(devin.add(add.purpose, { channel: from.channel, to: from.to }, add.key, add.session));
@@ -881,6 +1280,11 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			return JSON.stringify({ key: r.key, ...devin.curl(this.env.PUBLIC_URL, r) });
 		}
 		if (link) return JSON.stringify(devin.show(await this.#fx(devin.link(link.key, link.session))));
+		if (prompt) {
+			const r = await this.#fx(devin.find(prompt));
+			if (!r) throw new Error("no run " + prompt);
+			return JSON.stringify({ key: r.key, ...devin.curl(this.env.PUBLIC_URL, r) });
+		}
 		if (close.length) await this.#fx(devin.close(close));
 		if (report !== undefined) {
 			const items = devin.review(await this.#fx(devin.open), report);
@@ -902,15 +1306,176 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		const r = await this.#fx(devin.callback(key, url.searchParams.get("status") ?? "done", req.headers.get("x-raubot-ts") ?? "", req.headers.get("x-raubot-sig") ?? "", body).pipe(
 			Effect.map((ok) => ({ ok })), Effect.catchTag("DevinError", (e) => Effect.succeed({ err: e }))));
 		if ("err" in r) return new Response(r.err.message, { status: r.err.status });
-		await this.send(r.ok.text, r.ok.run.from);
+		await this.send(r.ok.text, r.ok.run.from, r.ok.images);
 		return new Response("ok");
 	}
 
-	/** The heartbeat cron, created once (removing it sticks). It reads HEARTBEAT.md and stays silent unless something needs the user. */
+	/** POST /s/devin/<key>/image?name=<file>: a signed screenshot upload. Saved in the box (shrunk to 2000px), held on the run until its next delivered message. */
+	async devinImage(key: string, req: Request) {
+		const url = new URL(req.url);
+		const len = Number(req.headers.get("content-length") ?? 0);
+		if (len > devin.MAX_IMAGE) return new Response("too big", { status: 413 });
+		const bytes = new Uint8Array(await req.arrayBuffer());
+		const r = await this.#fx(devin.image(key, url.searchParams.get("name") ?? "image", req.headers.get("x-raubot-ts") ?? "", req.headers.get("x-raubot-sig") ?? "", bytes).pipe(
+			Effect.map((ok) => ({ ok })), Effect.catchTag("DevinError", (e) => Effect.succeed({ err: e }))));
+		if ("err" in r) return new Response(r.err.message, { status: r.err.status });
+		await this.#fx(write(r.ok.path, bytes));
+		const f = "/workspace/" + r.ok.path;
+		await this.#fx(bash("command -v mogrify >/dev/null && mogrify -resize '2000x2000>' " + JSON.stringify(f) + "; true", 60)).catch(() => undefined);
+		return Response.json({ ok: true, path: r.ok.path });
+	}
+
+	/** Once: the old hourly heartbeat cron (a fresh subagent per run) gives way to the main-turn heartbeat, so the two never double-fire. */
 	async #seed() {
-		if (await this.ctx.storage.get("cron-seeded")) return;
-		await this.#fx(cron.put({ id: "heartbeat", schedule: "30 7-22 * * *", tz: cron.TZ, prompt: HEARTBEAT, mode: "agent", channel: "imessage", unless: "! grep -q '^[[:space:]]*- ' /workspace/HEARTBEAT.md", timeout: 900, enabled: true }));
-		await this.ctx.storage.put("cron-seeded", true);
+		if (await this.ctx.storage.get("hb-migrated")) return;
+		await this.#fx(cron.remove(["heartbeat"]));
+		await this.ctx.storage.put({ "hb-migrated": true, "cron-seeded": true });
+		await this.#hbState();
+	}
+
+	async #hbState(): Promise<hb.State> {
+		const s = await this.ctx.storage.get<hb.State>("hb-state");
+		if (s) return s;
+		const fresh: hb.State = { ...hb.DEFAULT, tasks: {}, nextDue: hb.nextTick(Date.now(), hb.DEFAULT) };
+		await this.ctx.storage.put("hb-state", fresh);
+		return fresh;
+	}
+
+	/** When the alarm must wake for the heartbeat: its next tick, a deferral, or soon while a heartbeat turn runs. */
+	async #hbWake() {
+		const s = await this.ctx.storage.get<hb.State>("hb-state");
+		if (!s) return Infinity;
+		const w = (await this.ctx.storage.get<number>("hb-wake")) ?? Infinity;
+		if (await this.ctx.storage.get("hb-turn")) return Math.min(w, Date.now() + hb.RETRY);
+		if (w < Infinity) return w;
+		if (s.paused && !s.wanted) return Infinity;
+		return s.wanted ? Date.now() : s.nextDue ?? Infinity;
+	}
+
+	/** Busy for heartbeats: a turn runs, inputs wait, or a cron run is in flight. User messages always win. */
+	async #hbBusy() {
+		if (this.busy() || (await this.#queued()).length) return true;
+		const jobs = await this.#fx(Effect.flatMap(Jobs, (j) => j.list()));
+		return jobs.some((j) => j.status === "running" && j.label.startsWith("cron "));
+	}
+
+	/** The alarm's heartbeat step: close a stuck turn, else fire, defer or skip per hb.decide. */
+	async #tick() {
+		const beat = await this.ctx.storage.get<Beat>("hb-turn");
+		if (beat) {
+			if (!this.busy() && Date.now() - beat.at > hb.STUCK) await this.#endBeat(beat, { status: "failed", reason: "no reply" });
+			return;
+		}
+		const wake = await this.ctx.storage.get<number>("hb-wake");
+		if (wake !== undefined && wake > Date.now()) return;
+		const s = await this.#hbState();
+		const d = hb.decide(Date.now(), s, await this.#hbBusy());
+		await this.ctx.storage.delete("hb-wake");
+		if (d.act === "defer") await this.ctx.storage.put("hb-wake", d.at);
+		else if (d.act === "quiet") await this.ctx.storage.put("hb-state", { ...s, nextDue: d.at, last: { at: Date.now(), status: "skipped", reason: "quiet-hours" } });
+		else if (d.act === "fire") await this.#beat(s, d.at!);
+	}
+
+	/** One heartbeat: HEARTBEAT.md, due tasks and the user's sent-message digest go in as a "[heartbeat]" turn of raubot's own conversation. */
+	async #beat(s: hb.State, nextDue: number) {
+		const now = Date.now(), manual = !!s.wanted;
+		const base: hb.State = { ...s, wanted: false, lastFire: now, nextDue };
+		const skip = (reason: string) => this.ctx.storage.put("hb-state", { ...base, last: { at: now, status: "skipped", reason } });
+		const cat = await this.#fx(Effect.flatMap(Box, (b) => b.exec("cat /workspace/HEARTBEAT.md", "", 30))).catch(() => undefined);
+		const md = cat && cat.exitCode === 0 ? cat.out : undefined;
+		if (md !== undefined && hb.empty(md)) return skip("empty-heartbeat-file");
+		const { body, tasks } = md === undefined ? { body: undefined, tasks: [] } : hb.parse(md);
+		const due = hb.dueTasks(tasks, s.tasks, now);
+		if (tasks.length && !due.length && (!body || hb.empty(body)) && !manual) return skip("no-due-tasks");
+		const digest = await this.#digest();
+		const input = hb.input({ stamp: cron.stamp(s.activeHours.tz, now), md: body, due, digest: digest.text, manual });
+		const started = await this.#serial(async () => {
+			if (await this.#hbBusy()) return false;
+			const beat: Beat = { at: now, tasks: due.map((t) => t.name), cursor: digest.cursor };
+			await this.ctx.storage.put({ "hb-turn": beat, "hb-state": { ...base, last: { at: now, status: "running" } } });
+			this.memory.set("hb-held", "[]");
+			this.#begin();
+			await this.root.reset(undefined, C);
+			await this.root.submit({ type: "input", content: input }, C);
+			return true;
+		});
+		if (!started) await this.ctx.storage.put({ "hb-wake": Date.now() + hb.RETRY, "hb-state": { ...s } });
+		else await this.#sync();
+	}
+
+	/** Pre-turn deterministic script: /workspace/watch/sent.js (the user's own Slack, Devin and email sends since its cursor). The cursor is committed only when the turn succeeds. */
+	async #digest(): Promise<{ text: string; cursor?: unknown }> {
+		try {
+			const r = await this.#fx(Effect.flatMap(Box, (b) => b.exec("cd /workspace && (git pull -q >/dev/null 2>&1 || true); cat watch/sent.js && printf '\\n//@@CURSOR@@\\n' && (cat watch/sent-cursor.json 2>/dev/null || echo null)", "", 60)));
+			if (r.exitCode !== 0 || !r.out.includes("//@@CURSOR@@")) return { text: "(digest unavailable: /workspace/watch/sent.js missing)" };
+			const [src, cur] = r.out.split("//@@CURSOR@@");
+			let cursor: unknown = null;
+			try { cursor = JSON.parse(cur.trim() || "null"); } catch {}
+			const code = `const __r = await (async (NOW, CURSOR) => {\n${src}\n})(${JSON.stringify(new Date().toISOString())}, ${JSON.stringify(cursor)});\nreturn "@@DIGEST@@" + JSON.stringify(__r) + "@@END@@";`;
+			const out = await codemode(code, this.#tools("heartbeat"), {}, AbortSignal.timeout(120_000), this.#app, undefined, Date.now() + 110_000);
+			if (out.error) return { text: `(digest failed: ${out.text.slice(0, 300)})` };
+			const m = /@@DIGEST@@([\s\S]*)@@END@@/.exec(out.text);
+			if (!m) return { text: `(digest failed: no result: ${out.text.slice(-300)})` };
+			// codemode prints a returned string JSON-quoted, so the payload comes back escaped.
+			const v = (() => { try { return JSON.parse(m[1]); } catch { return JSON.parse(JSON.parse(`"${m[1]}"`)); } })() as { text?: string; cursor?: unknown };
+			return { text: hb.capDigest(String(v.text ?? "")), cursor: v.cursor };
+		} catch (e) { return { text: `(digest failed: ${String(e).slice(0, 300)})` }; }
+	}
+
+	/** After each sync of a heartbeat turn: once it ends, an OK is dropped (a short note logged as one line), an alert is logged and delivered, and a turn a user message joined is logged in full. */
+	async #settleBeat(beat: Beat, held: Held[]) {
+		if (this.busy()) return;
+		const at = held.findIndex((h) => h.kind === "job" && h.text.startsWith(hb.TAG));
+		const replyAt = held.findLastIndex((h) => h.kind === "talk");
+		if (at < 0 || replyAt < at) return; // not started or no reply yet; #tick closes stuck turns
+		if (held.some((h, i) => i !== at && (h.kind === "user" || h.kind === "devin" || (h.kind === "job" && !h.text.startsWith(hb.TAG))))) {
+			for (const h of held) this.#log(h.kind, h.text, h.date);
+			return this.#endBeat(beat, { status: "mixed" }, true);
+		}
+		const s = await this.#hbState();
+		const v = hb.judge(held[replyAt].text, s.ackMaxChars);
+		if (v.kind === "ok") {
+			if (v.text) this.#log("job", `[heartbeat] ok: ${v.text.slice(0, 500)}`, Date.now());
+			return this.#endBeat(beat, { status: "ok", ...(v.text && { note: v.text.slice(0, 500) }) }, true);
+		}
+		held[replyAt] = { ...held[replyAt], text: v.text };
+		for (const h of held) this.#log(h.kind, h.text, h.date);
+		const status = await this.#hbDeliver(s, v.text);
+		return this.#endBeat(beat, { status }, true);
+	}
+
+	/** Alerts go where the user last wrote from (target "last") or to a fixed channel; a failed send falls back to the app, which shows the log. */
+	async #hbDeliver(s: hb.State, text: string) {
+		const to = s.target === "last" ? ((await this.ctx.storage.get<Origin>("last-from")) ?? APP) : s.target === "app" ? APP : await this.#origin(s.target).catch(() => APP);
+		if (to.channel === APP.channel) return "alerted via app";
+		try { await this.#fx(deliver(this.#channels, to, text)); return `alerted via ${to.channel}`; }
+		catch (e) { console.error("heartbeat deliver", e); return `alerted via app (${to.channel} failed)`; }
+	}
+
+	async #endBeat(beat: Beat, out: Omit<hb.Outcome, "at">, ok = false) {
+		const s = await this.#hbState();
+		const tasks = { ...s.tasks };
+		if (ok) for (const t of beat.tasks) tasks[t] = beat.at;
+		await this.ctx.storage.put("hb-state", { ...s, tasks, last: { at: Date.now(), ...out } });
+		await this.ctx.storage.delete("hb-turn");
+		this.memory.set("hb-held", "[]");
+		if (ok && beat.cursor) await this.#fx(write("/workspace/watch/sent-cursor.json", new TextEncoder().encode(JSON.stringify(beat.cursor)))).catch((e) => console.error("cursor", e));
+		await this.#arm();
+	}
+
+	/** `tools.heartbeat`. */
+	async #heartbeat({ every, activeHours, ackMaxChars, target, pause, run }: HeartbeatArgs) {
+		let s = await this.#hbState();
+		if (every !== undefined && !hb.duration(every)) throw new Error(`bad every "${every}" (use e.g. 30m, 2h)`);
+		if (activeHours && ![activeHours.start, activeHours.end].every((t) => /^\d\d?:\d\d$/.test(t))) throw new Error("activeHours start/end: HH:MM");
+		s = { ...s, ...(every && { every }), ...(activeHours && { activeHours: { ...activeHours, tz: activeHours.tz ?? s.activeHours.tz } }), ...(ackMaxChars !== undefined && { ackMaxChars }), ...(target && { target }), ...(pause !== undefined && { paused: pause }), ...(run && { wanted: true }) };
+		if (every || activeHours) s.nextDue = hb.nextTick(s.lastFire ?? Date.now(), s);
+		await this.ctx.storage.put("hb-state", s);
+		if (run) await this.ctx.storage.delete("hb-wake");
+		await this.#arm(run ? Date.now() + 5_000 : Infinity);
+		const pt = (t?: number) => (t ? `${new Date(t).toLocaleString("en-US", { timeZone: cron.TZ, dateStyle: "medium", timeStyle: "short" })} PT` : undefined);
+		const turn = await this.ctx.storage.get<Beat>("hb-turn");
+		return JSON.stringify({ ...s, lastFire: pt(s.lastFire), nextDue: pt(s.nextDue), last: s.last && { ...s.last, at: pt(s.last.at) }, tasks: Object.fromEntries(Object.entries(s.tasks).map(([k, v]) => [k, pt(v)])), ...(turn && { running: pt(turn.at) }), ...(run && { note: "Fires as soon as raubot is idle (after this turn)." }) });
 	}
 
 	/** Where a channel reaches the user: the last place they wrote from on it. */
@@ -925,9 +1490,31 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 	}
 
 	/** `tools.message`: a proactive send. Outside raubot's own turn (jobs, subagents) it's noted in the log, so raubot knows what the user got. */
-	#message(own: boolean) {
+	/** The main thread's model: the runtime choice in storage ("morph"), else MAIN_MODEL (e.g. Muse Wonder for talking); subagents keep MODEL (Opus, better at code). */
+	async #applyMainModel() {
+		const choice = (await this.ctx.storage.get<MainModel>("main-model")) ?? "default";
+		const main = choice === "morph" ? MORPH : { provider: this.env.PROVIDER, modelId: this.env.MAIN_MODEL || this.env.MODEL };
+		const now = (await this.root.agent(C)).model;
+		if (now?.provider !== main.provider || now?.modelId !== main.modelId) await this.root.configure({ model: main }, C);
+		return { model: choice, modelId: main.modelId };
+	}
+
+	#mainModel(root: boolean) {
+		return async ({ set }: { set?: MainModel }) => {
+			if (!root) throw new Error("main_model is only for raubot's main thread");
+			if (set === "morph" && !this.env.MORPH_API_KEY) throw new Error("MORPH_API_KEY is not set on this Worker");
+			if (set) await this.ctx.storage.put("main-model", set);
+			return { ...(await this.#applyMainModel()), default: this.env.MAIN_MODEL || this.env.MODEL };
+		};
+	}
+
+	#message(own: boolean, box: string) {
 		return async ({ text, channel = "imessage", files = [] }: { text: string; channel?: string; files?: string[] }) => {
 			const paths = files.map((f) => (f.startsWith("/") ? f : `/workspace/${f}`));
+			// Files are sent from the caller's own box, where they are; a missing one fails the send instead of being dropped.
+			const inBox = Effect.provide(BoxLive(this.env.BOX, box));
+			const missing = paths.length ? (await this.#fx(bash(`for f in ${paths.map((f) => `'${f.replaceAll("'", `'\\''`)}'`).join(" ")}; do [ -f "$f" ] || echo "missing: $f"; done`, 30).pipe(inBox))).match(/^missing: .*$/gm) : null;
+			if (missing) throw new Error(`Not sent: ${missing.join(", ")} not in your box.`);
 			// A job or subagent texting the user for a needless approval (a captcha, a login) gets it from Clef instead.
 			if (!own && (await this.#needless(text).catch(() => false))) {
 				console.log("auto-approved", JSON.stringify({ text: text.slice(0, 200) }));
@@ -935,7 +1522,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 			}
 			if (channel === APP.channel) this.#log("talk", text, Date.now());
 			else {
-				await this.#fx(deliver(this.#channels, await this.#origin(channel), text, paths));
+				await this.#fx(deliver(this.#channels, await this.#origin(channel), text, paths).pipe(inBox));
 				if (!own) this.#log("job", `[sent via ${channel}] ${text}${paths.length ? `\n[files: ${paths.join(", ")}]` : ""}`, Date.now());
 			}
 			return `Sent via ${channel}.`;
@@ -977,6 +1564,7 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 
 	/** Channel webhooks (POST /<channel>); everything else is the web app. */
 	async fetch(req: Request): Promise<Response> {
+		this.#deployed = req.headers.get(BUILD_HEADER) ?? this.#deployed;
 		const url = new URL(req.url);
 		const channel = req.method === "POST" ? this.#channels[url.pathname.slice(1)] : undefined;
 		if (channel) {
@@ -984,7 +1572,10 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 				Effect.tap((msgs) => Effect.forEach(msgs, (m) => Effect.sync(() => {
 					this.ctx.waitUntil(this.#fx(acknowledge(channel, m, this.env.AI)));
 					const files = m.files?.(uploads()).pipe(Effect.tapError((e) => Effect.logWarning(`${channel.name} attachments`, e)), Effect.orElseSucceed(() => [])) ?? Effect.succeed([]);
-					void this.#fx(files).then((fs) => this.send(m.text, m.from, fs)).catch((e) => console.error(channel.name, e));
+					const part = this.#fx(files).then((fs) => ({ from: m.from, text: m.text, files: fs }));
+					// Tapbacks go straight through; text, links and files from the same conversation are buffered into one message.
+					if (m.quiet) void part.then((p) => this.send(p.text, p.from, p.files)).catch((e) => console.error(channel.name, e));
+					else this.ctx.waitUntil(this.#coalesce.add(`${m.from.channel}:${m.from.to}`, part.catch((e) => (console.error(channel.name, e), { from: m.from, text: m.text, files: [] }))));
 				}))),
 				Effect.as(new Response("ok")),
 				Effect.catchTag("ChannelError", (e) => Effect.succeed(new Response(e.message, { status: e.status }))),
@@ -992,4 +1583,12 @@ Example: const r = await tools.agent({ task: "Find every open PR in repo X that 
 		}
 		return serve(this, req);
 	}
+
+	/** The iOS app's task routes (/tasks.json, /tasks, /tasks/<id>, /devices). */
+	tasksApi(req: Request) { return todos.http(this.todos, req); }
+
+	pairApi(req: Request) { return pair.http(this.pairing, this.env, req); }
+
+	/** The Tasks tab's Start: the task goes to working before /todo posts its message. */
+	async startTask(id: string) { return todos.start(this.todos, id); }
 }

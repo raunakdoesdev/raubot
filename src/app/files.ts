@@ -1,43 +1,51 @@
-// Workspace file viewer API: read-only browsing of an allowlist of box folders, for the web UI.
-// Checks run inside the box (realpath, so symlinks can't escape); secrets, keys, .ssh and .git are never served.
+// Box file browser API: read-only browsing of a box's whole filesystem (raubot's or a subagent's), for the web UI.
+// Checks run inside the box (fsview.py: realpath, so symlinks can't escape); /proc, /sys, /dev, keys, tokens, env files and vault data are never served.
+// Works through the box abstraction (Computer.exec/status), so it follows the box to any backend.
 import type { EdgeEnv } from "./index.ts";
+import PY from "./fsview.py";
+import { boxName, byteRange, pagePath, SLICE } from "./fsparse.ts";
 
-/** Runs in the box with the request as JSON on stdin. */
-const PY = "import json, os, sys, base64, re, stat, mimetypes\nROOTS = [\"/workspace/research\", \"/workspace/briefings\", \"/workspace/uploads\", \"/scratch\", \"/workspace/exe\", \"/workspace/repos\", \"/workspace/scan\", \"/workspace/scan2\", \"/workspace/raubot\"]\nDENY_DIRS = {\".ssh\", \".git\", \".gnupg\", \".aws\", \".docker\", \".config\", \".raubot\", \".wrangler\", \".cache\", \".bitwarden\", \"Bitwarden CLI\"}\nDENY_NAME = re.compile(r\"(^\\.env($|\\.)|^\\.dev\\.vars|^\\.npmrc$|^\\.netrc$|^\\.git-credentials$|^\\.pgpass$|^id_(rsa|dsa|ecdsa|ed25519)|\\.(pem|key|p12|pfx|kdbx|keystore|jks)$|^authorized_keys$|^known_hosts$|^cf-svc|^cf-env|^vault|(^|[._-])(tokens?|secrets?|credentials?|passwords?|passwd|apikey|api[._-]key)([._-]|$))\", re.I)\nFULL = 20 * 2**20\ndef bad(name): return name in DENY_DIRS or bool(DENY_NAME.search(name))\ndef roots(): return [(r, os.path.realpath(r)) for r in ROOTS if os.path.isdir(r)]\ndef check(p):\n    if not isinstance(p, str) or not p.startswith(\"/\") or \"\\0\" in p: raise PermissionError(\"bad path\")\n    norm = os.path.normpath(p)\n    real = os.path.realpath(norm)\n    for r, rr in roots():\n        for base, target in ((r, norm), (rr, real)):\n            if target != base and not target.startswith(base + \"/\"): break\n        else:\n            parts = [x for x in (norm[len(r):] + \"/\" + real[len(rr):]).split(\"/\") if x]\n            if any(bad(x) for x in parts): raise PermissionError(\"blocked\")\n            return norm, real\n    raise PermissionError(\"outside allowed folders\")\ndef main():\n    a = json.load(sys.stdin); op = a.get(\"op\")\n    if op == \"roots\":\n        return {\"roots\": [{\"path\": r, \"name\": r} for r, _ in roots()]}\n    p, real = check(a.get(\"path\"))\n    st = os.stat(real)\n    if op == \"list\":\n        if not stat.S_ISDIR(st.st_mode): raise NotADirectoryError(\"not a folder\")\n        out = []\n        with os.scandir(real) as it:\n            for e in it:\n                if bad(e.name): continue\n                try:\n                    _, er = check(p + \"/\" + e.name); s = os.stat(er)\n                except Exception: continue\n                out.append({\"name\": e.name, \"dir\": stat.S_ISDIR(s.st_mode), \"size\": s.st_size, \"mtime\": int(s.st_mtime)})\n        out.sort(key=lambda x: (not x[\"dir\"], x[\"name\"].lower()))\n        n = len(out)\n        return {\"path\": p, \"entries\": out[:3000], \"total\": n}\n    if op == \"read\":\n        if not stat.S_ISREG(st.st_mode): raise IsADirectoryError(\"not a file\")\n        size = st.st_size\n        off = max(0, int(a.get(\"offset\") or 0))\n        ln = a.get(\"length\")\n        if ln is None:\n            if size > FULL: return {\"error\": \"too big\", \"size\": size, \"status\": 413}\n            ln = size\n        ln = max(0, min(int(ln), FULL))\n        with open(real, \"rb\") as f:\n            f.seek(off); b = f.read(ln)\n        return {\"path\": p, \"size\": size, \"offset\": off, \"mtime\": int(st.st_mtime), \"mime\": mimetypes.guess_type(p)[0], \"b64\": base64.b64encode(b).decode()}\n    raise ValueError(\"bad op\")\ntry: r = main()\nexcept PermissionError as e: r = {\"error\": str(e), \"status\": 403}\nexcept FileNotFoundError: r = {\"error\": \"not found\", \"status\": 404}\nexcept (NotADirectoryError, IsADirectoryError, ValueError) as e: r = {\"error\": str(e), \"status\": 400}\nexcept Exception as e: r = {\"error\": type(e).__name__, \"status\": 500}\nsys.stdout.write(json.dumps(r))\n";
+/** An agent box name ("main" | "agent-<id>") to the box it really runs in. */
+export type BoxOf = (name: string) => Promise<string>;
 
 /** Ranged text reads are capped at RANGE; whole-file reads (download, images, PDFs) at 20 MB (enforced in PY). */
 const RANGE = 2 * 2 ** 20;
 
 /** Types the browser may render inline; everything else is served as plain text or a download. */
-const INLINE = /^(image\/(png|jpeg|gif|webp|avif|svg\+xml)|application\/pdf)$/;
+const INLINE = /^(image\/(png|jpeg|gif|webp|avif|svg\+xml|bmp|x-icon)|application\/pdf|video\/[\w.+-]+|audio\/[\w.+-]+)$/;
+const MEDIA = /^(video|audio)\//;
+const EXTRA_MIME: Record<string, string> = { webm: "video/webm", mkv: "video/x-matroska", mov: "video/quicktime", m4a: "audio/mp4", opus: "audio/ogg", flac: "audio/flac", avif: "image/avif", webp: "image/webp", heic: "image/heic", md: "text/markdown", ts: "text/plain", svelte: "text/plain" };
 
-type Out = { error?: string; status?: number; b64?: string; size?: number; offset?: number; mime?: string | null; path?: string };
+type Out = { error?: string; status?: number; b64?: string; size?: number; offset?: number; mime?: string | null; path?: string; [k: string]: unknown };
 
-const box = async (env: EdgeEnv, args: object): Promise<Out> => {
-	const r = await env.BOX.getByName("main").exec('python3 -c "$FV_PY"', JSON.stringify(args), 60, { FV_PY: PY });
+/** Boxes known to exist (ran at least once), so browsing never creates a box for a subagent that never used one. */
+const known = new Set<string>(["main"]);
+
+const run = async (env: EdgeEnv, name: string, args: object): Promise<Out> => {
+	const b = env.BOX.getByName(name);
+	if (!known.has(name)) {
+		const s = (await b.status()) as { running?: boolean; snapshot?: unknown; last?: unknown };
+		if (!s.running && !s.snapshot && !s.last) return { error: "This agent never used its box, so there are no files to show.", status: 404 };
+		known.add(name);
+	}
+	const r = await b.exec('python3 -c "$FV_PY"', JSON.stringify(args), 90, { FV_PY: PY });
 	try { return JSON.parse(r.out) as Out; } catch { return { error: (r.err || r.out).slice(0, 300) || "box error", status: 502 }; }
 };
 
 const fail = (o: Out) => new Response(o.error ?? "error", { status: o.status ?? 500, headers: { "cache-control": "no-store" } });
-
 const bytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-
-/** /file/<path> maps to a box path: /file/scratch/x -> /scratch/x, /file/workspace/x and /file/x -> /workspace/x. */
-const boxPath = (rest: string) => {
-	const p = rest.split("/").map((x) => { try { return decodeURIComponent(x); } catch { return x; } }).join("/");
-	return /^(scratch|workspace)(\/|$)/.test(p) ? "/" + p : "/workspace/" + p;
-};
+const mimeOf = (path: string, m?: string | null) => m || EXTRA_MIME[path.split(".").pop()!.toLowerCase()] || "";
 
 const HTML = /^(text\/html|application\/xhtml\+xml)$/;
 /** Subresource types a page may load from next to it (CSS, JS, fonts, media). Others go as plain text. */
 const ASSET = /^(text\/(css|javascript)|application\/(javascript|json|wasm)|font\/[\w.+-]+|image\/[\w.+-]+|audio\/[\w.+-]+|video\/[\w.+-]+|application\/pdf)$/;
 
-/** GET /file/<path>: a file served full page (HTML for phones). HTML runs in an opaque-origin sandbox: scripts yes, app cookies/API/storage no. */
-const page = async (env: EdgeEnv, url: URL): Promise<Response> => {
-	const rest = url.pathname.slice("/file/".length), path = boxPath(rest);
-	const o = await box(env, { op: "read", path });
+/** GET /file/<path> (or /file/~<agent>/<path>): a file served full page (HTML for phones). HTML runs in an opaque-origin sandbox: scripts yes, app cookies/API/storage no. */
+const page = async (env: EdgeEnv, url: URL, boxOf: BoxOf): Promise<Response> => {
+	const p = pagePath(url.pathname.slice("/file/".length)), path = p.path, box = await boxOf(p.box);
+	const o = await run(env, box, { op: "read", path });
 	if (o.error) return fail(o);
-	let mime = o.mime ?? "";
+	let mime = mimeOf(path, o.mime);
 	if (/\.m?js$/i.test(path)) mime = "text/javascript";
 	const html = HTML.test(mime) || /\.x?html?$/i.test(path);
 	const h = new Headers({ "x-content-type-options": "nosniff", "cache-control": "private, no-store", "referrer-policy": "no-referrer", "cross-origin-opener-policy": "same-origin" });
@@ -64,32 +72,61 @@ const page = async (env: EdgeEnv, url: URL): Promise<Response> => {
 	return new Response(bytes(o.b64 ?? ""), { headers: h });
 };
 
-/** GET /files.json?path= (no path: the roots), GET /file?path=&offset=&length=&dl=1, GET /file/<path>. */
-export const files = async (req: Request, env: EdgeEnv, url: URL): Promise<Response> => {
-	if (req.method !== "GET") return new Response("method not allowed", { status: 405 });
-	// Behind Cloudflare Access like the rest of the app; refuse if Access isn't in front (except local dev).
-	if (!req.headers.get("cf-access-jwt-assertion") && !/^(localhost|127\.0\.0\.1)$/.test(url.hostname)) return new Response("forbidden", { status: 403 });
-	if (url.pathname.startsWith("/file/")) return page(env, url);
+/**
+ * GET /files.json?box=&path= (no path: the roots), ?box=&paths=a,b (several listings, for live polling), ?box=&find=q&path=root, ?box=&stat=path.
+ * GET /file?box=&path=&offset=&length=&dl=1 (Range: bytes= streams video/audio and big files in SLICE pieces), GET /file/<path>.
+ */
+export const files = async (req: Request, env: EdgeEnv, url: URL, boxOf: BoxOf): Promise<Response> => {
+	if (req.method !== "GET" && req.method !== "HEAD") return new Response("method not allowed", { status: 405 });
+	// Access: the Worker's default-deny gate (access.ts) has verified the JWT before this runs.
+	if (url.pathname.startsWith("/file/")) return page(env, url, boxOf);
 	const q = url.searchParams, path = q.get("path") ?? "";
+	const asked = boxName(q.get("box"));
+	if (!asked) return new Response("bad box", { status: 400 });
+	const box = await boxOf(asked);
+	const json = (o: Out) => (o.error ? fail(o) : Response.json(o, { headers: { "cache-control": "no-store" } }));
 	if (url.pathname === "/files.json") {
-		const o = await box(env, path ? { op: "list", path } : { op: "roots" });
-		return o.error ? fail(o) : Response.json(o, { headers: { "cache-control": "no-store" } });
+		if (q.has("paths")) return json(await run(env, box, { op: "lists", paths: q.getAll("paths").flatMap((p) => p.split("\n")).filter(Boolean) }));
+		if (q.has("find")) return json(await run(env, box, { op: "find", q: q.get("find"), path: path || "/workspace" }));
+		if (q.has("stat")) return json(await run(env, box, { op: "stat", path: q.get("stat") }));
+		return json(await run(env, box, path ? { op: "list", path } : { op: "roots" }));
 	}
-	const len = q.get("length");
-	const o = await box(env, { op: "read", path, offset: Number(q.get("offset") ?? 0) || 0, length: len === null ? undefined : Math.min(RANGE, Math.max(0, Number(len) || 0)) });
+	const name = path.split("/").pop() || "file";
+	const len = q.get("length"), rangeH = req.headers.get("range");
+	let args: { op: string; path: string; offset: number; length?: number };
+	let ranged = false;
+	if (rangeH) {
+		// Size first (cheap stat), then the slice: Content-Range needs both.
+		const s = await run(env, box, { op: "stat", path });
+		if (s.error) return fail(s);
+		const r = byteRange(rangeH, Number(s.size ?? 0));
+		if (r === "bad") return new Response(null, { status: 416, headers: { "content-range": `bytes */${s.size}` } });
+		if (r) { args = { op: "read", path, offset: r.start, length: r.end - r.start + 1 }; ranged = true; }
+		else args = { op: "read", path, offset: 0 };
+	} else if (len !== null) args = { op: "read", path, offset: Number(q.get("offset") ?? 0) || 0, length: Math.min(RANGE, Math.max(0, Number(len) || 0)) };
+	else args = { op: "read", path, offset: 0 };
+	let o = await run(env, box, args);
+	// Too big to send whole: media and downloads stream from the first slice (the browser asks for the rest by Range).
+	if (o.status === 413 && !ranged) { o = await run(env, box, { op: "read", path, offset: 0, length: SLICE }); ranged = true; }
 	if (o.error) return fail(o);
-	const name = path.split("/").pop() || "file", mime = o.mime ?? "";
+	const mime = mimeOf(path, o.mime), body = bytes(o.b64 ?? ""), size = Number(o.size ?? 0), off = Number(o.offset ?? 0);
 	const inline = INLINE.test(mime);
 	const h = new Headers({
 		"content-type": inline ? mime : "text/plain; charset=utf-8",
 		"x-content-type-options": "nosniff",
 		"cache-control": "private, no-store",
-		"x-file-size": String(o.size ?? 0),
-		"x-file-offset": String(o.offset ?? 0),
+		"accept-ranges": "bytes",
+		"x-file-size": String(size),
+		"x-file-offset": String(off),
+		"x-file-mtime": String(o.mtime ?? ""),
 		"content-disposition": `${q.get("dl") ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(name)}`,
 	});
 	if (q.get("dl")) h.set("content-type", "application/octet-stream");
-	// PDFs need the browser's viewer; anything else rendered raw gets no scripts.
-	if (mime !== "application/pdf") h.set("content-security-policy", "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'");
-	return new Response(bytes(o.b64 ?? ""), { headers: h });
+	// PDFs need the browser's viewer and media its player; anything else rendered raw gets no scripts.
+	if (mime !== "application/pdf" && !MEDIA.test(mime)) h.set("content-security-policy", "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'");
+	if (ranged) {
+		h.set("content-range", `bytes ${off}-${off + body.length - 1}/${size}`);
+		return new Response(req.method === "HEAD" ? null : body, { status: 206, headers: h });
+	}
+	return new Response(req.method === "HEAD" ? null : body, { headers: h });
 };

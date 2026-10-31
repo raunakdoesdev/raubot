@@ -1,15 +1,17 @@
 <script lang="ts">
 	import { tick } from "svelte";
-	import { ArrowDown, ArrowUp, ChevronRight, PanelLeft, Paperclip, Settings, Square, X } from "@lucide/svelte";
+	import { ArrowDown, ArrowUp, ChevronRight, FolderTree, Mic, PanelLeft, Paperclip, Settings, Square, Undo2, X } from "@lucide/svelte";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import ToolRow from "$lib/ToolRow.svelte";
 	import { parseTool, traces } from "$lib/traces.svelte";
 	import Header from "$lib/Header.svelte";
+	import Takeover from "$lib/Takeover.svelte";
 	import SecretForm from "$lib/SecretForm.svelte";
 	import Sidebar from "$lib/Sidebar.svelte";
 	import AgentView from "$lib/AgentView.svelte";
 	import FilePanel from "$lib/FilePanel.svelte";
+	import { openBrowser, viewer } from "$lib/files.svelte";
 	import { linkPaths, md, mdLive } from "$lib/md";
 	import Virtual from "$lib/Virtual.svelte";
 	const plain = (s: string) => linkPaths(s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"));
@@ -17,7 +19,7 @@
 	type Line = { i: number; kind: string; text: string; date?: number };
 	/** `body` is the call line; `echo` its result; codemode rows carry their `code` and `hash` (matched to a live trace), job rows their `job` id. */
 	type Tool = { kind: "tool"; i: number; name: string; head: string; body: string; arg?: string; code?: string; hash?: string; echo?: string; date?: number; job?: number };
-	type Item = { kind: "user" | "talk"; i: number; text: string } | Tool;
+	type Item = { kind: "user" | "talk"; i: number; text: string; voice?: boolean } | Tool;
 	type Ask = { token: string; name: string; why: string };
 
 	/** A message shown the moment it's sent, until the server echoes it back queued, steering or in the log (t3code's optimistic send). */
@@ -30,6 +32,11 @@
 	let main = $state<HTMLElement>(), box: HTMLTextAreaElement, picker: HTMLInputElement, ws: WebSocket;
 	let open: { name: string; at: number }[] = [];
 	let selected = $state(0), menu = $state(false);
+	// An open file browser follows the agent you switch to.
+	// A deep link into a subagent's box (#file=...&box=<id>) opens that subagent too.
+	if (viewer.open && viewer.box) selected = viewer.box;
+	let prevSel = selected;
+	$effect(() => { const s = selected; if (s !== prevSel) { prevSel = s; if (viewer.open) openBrowser(s); } });
 
 	const strip = (s: string) => s.replace(/^\[(via \w+|iMessage)\] /, "");
 	/** Signed Devin callbacks: their own row, whatever kind older logs gave them. */
@@ -60,7 +67,7 @@
 			if (x.kind === "tool") open.push({ name, at: items.length - 1 });
 		} else {
 			open = [];
-			items.push({ kind: x.kind === "user" ? "user" : "talk", i: x.i, text: x.kind === "user" ? strip(x.text) : x.text });
+			items.push({ kind: x.kind === "user" ? "user" : "talk", i: x.i, text: x.kind === "user" ? strip(x.text) : x.text, voice: x.kind === "user" && x.text.startsWith("[via voice]") });
 		}
 	}
 
@@ -79,6 +86,8 @@
 			if (m.asks) asks = m.asks;
 			if (m.queued) queued = m.queued;
 			if (m.steering) steering = m.steering;
+			// Messages were hidden or restored: redraw from the server's copy.
+			if (m.reload) { items = []; open = []; seen = -1; for (const x of m.reload) { add(x); seen = x.i; } }
 			if (m.history) {
 				// A reconnect's snapshot: keep what's drawn and add only newer lines, unless there's a gap.
 				if (m.history[0]?.i > seen + 1) { items = []; open = []; }
@@ -105,6 +114,16 @@
 		next = p;
 		if (!p) { cancelAnimationFrame(frame); frame = 0; partial = ""; return; }
 		frame ||= requestAnimationFrame(() => { frame = 0; partial = next; if (stuck) down(true); });
+	}
+	/** Soft delete: this message and everything after it leave raubot's memory as one group, which "restore" brings back. */
+	async function hideFrom(i: number) {
+		const ids = Array.from({ length: seen - i + 1 }, (_, k) => i + k);
+		const r = await fetch("/hide", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids }) });
+		if (!r.ok) note = await r.text();
+	}
+	async function restore() {
+		const r = await fetch("/restore", { method: "POST" });
+		if (!r.ok) note = await r.text();
 	}
 	function flush(l: Local) {
 		if (ws.readyState !== WebSocket.OPEN) return;
@@ -167,16 +186,19 @@
 			return generic ? new File([f], `pasted-${stamp}${got.length > 1 ? `-${k + 1}` : ""}.${ext}`, { type: f.type }) : f;
 		}));
 	}
+	let taking = $state(false);
+	const handBack = (steer: string) => { if (steer) ws.send(JSON.stringify({ send: steer })); else taking = false; };
 	const key = (e: KeyboardEvent) => {
 		if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer:coarse)").matches) { e.preventDefault(); send(); }
 	};
 </script>
 
 <svelte:window ondragover={guard} ondrop={guard} />
+{#if taking}<Takeover box="main" onhandback={handBack} />{/if}
 <div class="flex h-dvh overflow-hidden">
 <Sidebar bind:selected bind:open={menu} />
 {#if selected}{#key selected}<AgentView id={selected} onmenu={() => (menu = true)} />{/key}{/if}
-<div class="relative flex h-dvh min-w-0 flex-1 flex-col overflow-hidden" class:hidden={selected !== 0} role="region" aria-label="chat" ondragenter={dragenter} ondragover={dragover} ondragleave={dragleave} ondrop={drop}>
+<div class="relative flex h-dvh min-w-0 flex-1 flex-col overflow-hidden" class:hidden={selected !== 0} data-box="0" role="region" aria-label="chat" ondragenter={dragenter} ondragover={dragover} ondragleave={dragleave} ondrop={drop}>
 	{#if drag}
 		<div class="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-background/80 p-6 backdrop-blur-sm">
 			<div class="flex h-full w-full max-w-3xl flex-col items-center justify-center gap-2 rounded-3xl border-2 border-dashed border-primary/60 text-muted-foreground">
@@ -188,6 +210,9 @@
 	<Header>
 		{#snippet lead()}<Button variant="ghost" size="icon-sm" class="md:hidden" aria-label="menu" onclick={() => (menu = true)}><PanelLeft /></Button>{/snippet}
 		<span class="truncate text-sm text-muted-foreground">{status}</span>
+		<Button variant="ghost" size="icon-sm" aria-label="files" title="Browse raubot's box" onclick={() => openBrowser(0)}><FolderTree /></Button>
+		<Button variant="ghost" size="sm" onclick={() => (taking = true)}>Take control</Button>
+		<Button href="/voice" variant="ghost" size="icon-sm" aria-label="voice"><Mic /></Button>
 		<Button href="/settings" variant="ghost" size="icon-sm" aria-label="settings"><Settings /></Button>
 	</Header>
 
@@ -196,7 +221,12 @@
 			<Virtual {items} key={(x) => x.i} scroller={main} bind:stuck>
 				{#snippet row(x)}
 					{#if x.kind === "user"}
-						<div class="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 whitespace-pre-wrap [overflow-wrap:anywhere]" title="#{x.i}">{@html plain(x.text)}</div>
+						{#if x.voice}<div class="ml-auto max-w-[85%] text-right text-xs text-violet-400">🎙 voice agent → raubot</div>{/if}
+						<div class="group ml-auto flex max-w-[85%] items-start gap-1">
+							{#if !/^\[hidden: /.test(x.text)}<button class="mt-2 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 focus:opacity-100" aria-label="undo from here" title="Hide this message and everything after it from raubot's memory (restorable)" onclick={() => hideFrom(x.i)}><Undo2 class="size-3.5" /></button>{/if}
+							<div class={["rounded-2xl rounded-br-md px-4 py-2.5 whitespace-pre-wrap [overflow-wrap:anywhere]", x.voice ? "bg-violet-500/15" : "bg-secondary"]} title="#{x.i}">{@html plain(x.text)}</div>
+						</div>
+						{#if /^\[hidden: /.test(x.text)}<button class="ml-auto text-xs text-muted-foreground underline" onclick={restore}>restore</button>{/if}
 					{:else if x.kind === "talk"}
 						<div class="md" title="#{x.i}">{@html md(x.text)}</div>
 					{:else if x.kind === "tool"}
@@ -244,5 +274,5 @@
 		<input bind:this={picker} type="file" multiple hidden onchange={pick} />
 	</form>
 </div>
-</div>
 <FilePanel />
+</div>

@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { tick } from "svelte";
-	import { Bot, Monitor, Search } from "@lucide/svelte";
+	import { Bot, Monitor, PenLine, Search } from "@lucide/svelte";
 
-	type Row = { id: number; task: string; computer: boolean; status: "running" | "idle"; started: string };
+	type Row = { id: number; task: string; computer: boolean; writer?: boolean; status: "running" | "idle"; started: string };
 	let { open = $bindable(false), onpick }: { open?: boolean; onpick: (id: number) => void } = $props();
 	let rows = $state<Row[]>([]), q = $state(""), at = $state(0), loading = $state(false), err = $state("");
 	let input = $state<HTMLInputElement>(), list = $state<HTMLElement>();
@@ -56,7 +56,7 @@
 						<span class="size-2 shrink-0 rounded-full {r.status === 'running' ? 'bg-emerald-400' : 'bg-muted-foreground/40'}"></span>
 						<span class="truncate">{title(r.task)}</span>
 						<span class="ml-auto flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-							{#if r.computer}<Monitor class="size-3" />{:else}<Bot class="size-3" />{/if}#{r.id} · {ago(r.started)}
+							{#if r.computer}<Monitor class="size-3" />{:else if r.writer}<PenLine class="size-3" />{:else}<Bot class="size-3" />{/if}#{r.id} · {ago(r.started)}
 						</span>
 					</button>
 				{:else}

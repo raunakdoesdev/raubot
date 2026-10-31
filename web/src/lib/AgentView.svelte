@@ -1,16 +1,18 @@
 <script lang="ts">
 	import { onDestroy, tick } from "svelte";
-	import { ArrowUp, ChevronRight, PanelLeft } from "@lucide/svelte";
+	import { ArrowUp, ChevronRight, FolderTree, PanelLeft } from "@lucide/svelte";
+	import { openBrowser } from "$lib/files.svelte";
 	import { Button } from "$lib/components/ui/button";
 	import * as Collapsible from "$lib/components/ui/collapsible";
 	import Header from "$lib/Header.svelte";
+	import Takeover from "$lib/Takeover.svelte";
 	import { md } from "$lib/md";
 	import ToolRow from "$lib/ToolRow.svelte";
 	import { fnv, summary, traces } from "$lib/traces.svelte";
 	import Virtual from "$lib/Virtual.svelte";
 
 	type Line = { role: "user" | "assistant" | "tool" | "result"; text: string; name?: string };
-	type Agent = { id: number; task: string; computer: boolean; status: "running" | "idle"; started: string; last: string };
+	type Agent = { id: number; task: string; computer: boolean; writer?: boolean; status: "running" | "idle"; started: string; last: string };
 
 	let { id, onmenu }: { id: number; onmenu: () => void } = $props();
 	let agent = $state<Agent>(), lines = $state<Line[]>([]), note = $state(""), text = $state("");
@@ -88,15 +90,20 @@
 			if (at >= 0) pending[at].failed = String(e).slice(0, 160);
 		}
 	}
+	let taking = $state(false);
+	const handBack = async (steer: string) => { if (steer) { text = steer; await send(); } else taking = false; };
 	const key = (e: KeyboardEvent) => {
 		if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer:coarse)").matches) { e.preventDefault(); send(); }
 	};
 </script>
 
-<div class="flex h-dvh min-w-0 flex-1 flex-col overflow-hidden">
+{#if taking}<Takeover box={`agent-${id}`} onhandback={handBack} />{/if}
+<div class="flex h-dvh min-w-0 flex-1 flex-col overflow-hidden" data-box={id}>
 	<Header title={`subagent #${id}`}>
 		{#snippet lead()}<Button variant="ghost" size="icon-sm" class="md:hidden" aria-label="menu" onclick={onmenu}><PanelLeft /></Button>{/snippet}
-		<span class="truncate text-sm text-muted-foreground">{note || (agent ? `${agent.status}${agent.computer ? " · computer" : ""}` : "loading…")}</span>
+		{#if agent?.computer}<Button variant="ghost" size="sm" onclick={() => (taking = true)}>Take control</Button>{/if}
+		<span class="truncate text-sm text-muted-foreground">{note || (agent ? `${agent.status}${agent.computer ? " · computer" : agent.writer ? " · writer" : ""}` : "loading…")}</span>
+		<Button variant="ghost" size="sm" class="ml-auto" aria-label="files" title="Browse this subagent's box" onclick={() => openBrowser(id)}><FolderTree /> Files</Button>
 	</Header>
 
 	{#if shot && agent?.computer}

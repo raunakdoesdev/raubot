@@ -2,19 +2,19 @@
 // Started on demand by cli.mjs; restarted by it when this code changes.
 import http from "node:http";
 import fs from "node:fs";
-import { chromium } from "playwright";
 import * as vault from "./vault.mjs";
 import { attach } from "./passkeys.mjs";
+import { launch } from "./launch.mjs";
 
 export const SOCK = "/tmp/raubot-browser.sock";
 const DIR = `${process.env.HOME}/.raubot`;
-const VIEWPORT = { width: 1440, height: 900 };
 
 let ctx, page, env = {}, keys;
 const tabs = new Map(); // page -> authenticator
 const state = {};
 const used = new Map(); // value -> ref, scrubbed from output
 
+// Passkeys are on the authenticators only while a run is going: loaded from the vault into memory at its start, removed at its end.
 // Every tab has its own authenticator, so a use in one tab is copied to the others; vault saves run one at a time.
 let saving = Promise.resolve();
 async function onUse(p, n, from) {
@@ -32,22 +32,25 @@ async function arm(p) {
 	if (keys) await a.set(keys);
 }
 
-/** Loads (or with `fresh`, reloads) the vault's passkeys into every tab. */
-async function loadKeys(fresh = false) {
-	if (!vault.ready(env) || (keys && !fresh)) return;
+/** Loads the vault's passkeys into every tab. */
+async function loadKeys() {
+	if (!vault.ready(env)) return;
 	keys = await vault.passkeys(env);
 	for (const a of tabs.values()) await a.set(keys);
 }
 
+/** Takes the passkeys off every authenticator and drops the values this run used, once pending counter saves are done. */
+async function forget() {
+	keys = undefined;
+	for (const a of tabs.values()) await a.set([]).catch(() => {});
+	await saving;
+	used.clear();
+	vault.forget();
+}
+
 async function browser() {
 	if (ctx) return ctx;
-	fs.mkdirSync(`${DIR}/browser`, { recursive: true });
-	// A box copied from a snapshot keeps the original box's Chromium locks; this server is the profile's only user.
-	for (const f of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) fs.rmSync(`${DIR}/browser/${f}`, { force: true });
-	ctx = await chromium.launchPersistentContext(`${DIR}/browser`, {
-		channel: "chromium", headless: true, viewport: VIEWPORT, deviceScaleFactor: 1, acceptDownloads: true, ...(fs.existsSync("/workspace") ? { downloadsPath: "/workspace/uploads/downloads" } : {}),
-		args: ["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-	});
+	ctx = await launch(`${DIR}/browser`, { acceptDownloads: true, ...(fs.existsSync("/workspace") ? { downloadsPath: "/workspace/uploads/downloads" } : {}) });
 	ctx.on("page", (p) => { page = p; void arm(p); });
 	ctx.on("close", () => { ctx = undefined; tabs.clear(); });
 	for (const p of ctx.pages()) await arm(p);
@@ -92,9 +95,11 @@ async function run({ code, timeout = 60, jar }) {
 	const target = (t) => (typeof t === "string" ? page.locator(t) : t);
 	const v = {
 		find: (...words) => vault.find(env, words.flat()),
+		// No website lock (user directive, 2026-10-13): any vault item (login, secure note, card, identity)
+		// fills/types wherever the agent explicitly asks by ref. Saved URIs are metadata, never a gate.
 		fill: async (t, ref) => target(t).fill(remember(ref, await vault.resolve(env, ref))),
 		type: async (ref, opts) => page.keyboard.type(remember(ref, await vault.resolve(env, ref)), { delay: 40, ...opts }),
-		sync: async () => { vault.refresh(); await loadKeys(true); return `${keys?.length ?? 0} passkeys loaded`; },
+		sync: async () => { vault.refresh(); await loadKeys(); return `${keys?.length ?? 0} passkeys loaded`; },
 	};
 	const fn = new (Object.getPrototypeOf(async () => {}).constructor)("page", "context", "state", "vault", "screenshot", "console", "sleep", code);
 	let error;
@@ -108,21 +113,24 @@ async function run({ code, timeout = 60, jar }) {
 	if (page.isClosed()) page = ctx.pages().at(-1) ?? (await ctx.newPage());
 	if (!images.length) await screenshot().catch(() => {});
 	const all = await Promise.all(ctx.pages().map(async (p, i) => `${p === page ? "*" : " "}${i} ${await p.title().catch(() => "")} ${p.url()}`));
-	return { out: scrub(out.join("\n")), error, images, tabs: all.join("\n"), changed: await changed().catch(() => ({})) };
+	const result = { out: scrub(out.join("\n")), error, images, tabs: all.join("\n"), changed: await changed().catch(() => ({})) };
+	await forget();
+	return result;
 }
 
 let chain = Promise.resolve();
 const serial = (f) => (chain = chain.then(f, f));
 
 const ops = {
-	run: (b) => serial(() => run(b)),
+	run: (b) => serial(() => run(b).catch(async (e) => { await forget(); throw e; })),
+	loaded: async () => (await Promise.all([...tabs.values()].map((a) => a.session.send("WebAuthn.getCredentials", { authenticatorId: a.authenticatorId }).then((r) => r.credentials.length, () => 0)))).reduce((x, y) => x + y, 0),
 	find: (b) => vault.find(env, b.words),
 	resolve: async (b) => Object.fromEntries(await Promise.all(Object.entries(b.refs).map(async ([k, ref]) => [k, await vault.resolve(env, ref)]))),
 	quit: async () => { setTimeout(async () => { await ctx?.close().catch(() => {}); process.exit(0); }, 50); return "bye"; },
 	version: async () => VERSION,
 };
 
-const VERSION = ["server.mjs", "vault.mjs", "passkeys.mjs"].map((f) => fs.statSync(new URL(f, import.meta.url)).mtimeMs).join(":");
+const VERSION = ["server.mjs", "launch.mjs", "vault.mjs", "passkeys.mjs", "blocklist.mjs"].map((f) => fs.statSync(new URL(f, import.meta.url)).mtimeMs).join(":");
 
 fs.rmSync(SOCK, { force: true });
 http.createServer(async (req, res) => {
@@ -140,4 +148,4 @@ http.createServer(async (req, res) => {
 	const jpeg = ctx && page && !page.isClosed() ? await page.screenshot({ type: "jpeg", quality: 60, timeout: 5000 }).catch(() => undefined) : undefined;
 	if (!jpeg) return res.writeHead(204).end();
 	res.writeHead(200, { "content-type": "image/jpeg", "x-url": encodeURI(page.url()) }).end(jpeg);
-}).listen(8090, "0.0.0.0");
+}).listen(Number(process.env.RAUBOT_SCREEN_PORT ?? 8090), "0.0.0.0");

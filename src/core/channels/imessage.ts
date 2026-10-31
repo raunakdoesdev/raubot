@@ -1,4 +1,5 @@
 import { Effect } from "effect";
+import { same } from "../crypto.ts";
 import { bash, kv } from "../fx.ts";
 import { type Channel, ChannelError, images } from "./index.ts";
 
@@ -31,7 +32,7 @@ const signed = (secret: string, h: Headers, body: string) => Effect.promise(asyn
 	if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
 	const enc = new TextEncoder();
 	const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-	return sig === `v0=${hex(await crypto.subtle.sign("HMAC", key, enc.encode(`v0:${ts}:${body}`)))}`;
+	return same(sig, `v0=${hex(await crypto.subtle.sign("HMAC", key, enc.encode(`v0:${ts}:${body}`)))}`);
 });
 
 const b64 = (s: string) => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
@@ -40,7 +41,7 @@ const q = (v: string) => `'${v.replace(/'/g, "'\\''")}'`;
 
 /** Runs imessage/spectrum.mjs (from GitHub main) in the box with these env vars; `env` is for secrets, kept out of the command line. */
 const spectrum = (space: string, vars: Record<string, string>, env?: Record<string, string>) => bash(`# imessage ${vars.OP}
-flock /tmp/imessage.lock sh -c 'git -C raubot fetch -q && git -C raubot checkout -q origin/main -- imessage && cd raubot/imessage && { [ -d node_modules/ffmpeg-static ] || npm i -s; }' && cd raubot/imessage && ${Object.entries({ SPACE: space, ...vars }).map(([k, v]) => `${k}=${q(v)}`).join(" ")} node spectrum.mjs`, 120, env).pipe(
+flock /tmp/imessage.lock sh -c 'git -C raubot fetch -q && git -C raubot checkout -q origin/main -- imessage && cd raubot/imessage && { [ node_modules/.package-lock.json -nt package-lock.json ] || npm i -s --no-audit --no-fund; }' && cd raubot/imessage && ${Object.entries({ SPACE: space, ...vars }).map(([k, v]) => `${k}=${q(v)}`).join(" ")} node spectrum.mjs`, 120, env).pipe(
 	Effect.mapError((e) => new ChannelError({ message: e.message, status: 502 })),
 	Effect.filterOrFail((out) => /\[exit 0\]\s*$/.test(out), (out) => new ChannelError({ message: `${vars.OP} failed: ${out.slice(-500)}`, status: 502 })),
 );
@@ -49,9 +50,9 @@ flock /tmp/imessage.lock sh -c 'git -C raubot fetch -q && git -C raubot checkout
 export const location = (space: string) => spectrum(space, { OP: "location" }).pipe(Effect.map((out) => /^LOCATION (.*)$/m.exec(out)?.[1] ?? "unknown"));
 
 /** iMessage through Photon's Spectrum. Its SDK is gRPC, which Workers can't speak, so the box runs its actions. */
-export const imessage = (secret: string, openai: string): Channel => ({
+export const imessage = (secret: string, openai: string, r2: Record<string, string>): Channel => ({
 	name: "imessage",
-	style: "a text message: keep the reply short and in plain text, with no markdown (no **, _, #, tables or code blocks); write links as bare URLs. The one exception: a markdown image of a box file goes as a real attachment.",
+	style: "a text message: keep the reply short and in plain text, with no markdown (no **, _, #, tables or code blocks); write links as bare URLs. The one exception: a markdown image of a box file goes as a real attachment (files over 5 MB arrive as a download link).",
 	receive: (req) => Effect.gen(function* () {
 		const body = yield* Effect.promise(() => req.text());
 		if (!(yield* signed(secret, req.headers, body))) return yield* new ChannelError({ message: "bad signature", status: 401 });
@@ -67,7 +68,7 @@ export const imessage = (secret: string, openai: string): Channel => ({
 	}),
 	send: (to, text, extra = []) => {
 		const m = images(text), files = [...new Set([...m.files, ...extra])];
-		return Effect.asVoid(spectrum(to, { OP: "send", TEXT_B64: b64(m.text), ...(files.length ? { FILES: JSON.stringify(files) } : {}) }));
+		return Effect.asVoid(spectrum(to, { OP: "send", TEXT_B64: b64(m.text), ...(files.length ? { FILES: JSON.stringify(files) } : {}) }, r2));
 	},
 	read: (m) => Effect.asVoid(spectrum(m.from.to, { OP: "read", MSG: m.id })),
 	typing: (to, on) => Effect.asVoid(spectrum(to, { OP: "typing", ON: on ? "1" : "0" })),

@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { onDestroy } from "svelte";
-	import { Bot, Clock, MessageSquare, Monitor, Search } from "@lucide/svelte";
+	import { Bot, Clock, FolderTree, MessageSquare, Monitor, PenLine, Search } from "@lucide/svelte";
+	import { openBrowser } from "$lib/files.svelte";
 	import Palette from "$lib/Palette.svelte";
 
-	type AgentRow = { id: number; task: string; computer: boolean; status: "running" | "idle"; started: string; last: string };
+	type AgentRow = { id: number; task: string; computer: boolean; writer?: boolean; status: "running" | "idle"; started: string; last: string };
 	type JobRow = { id: number; label: string; status: string; started: string; ended?: string };
 
 	let { selected = $bindable(0), open = $bindable(false) }: { selected?: number; open?: boolean } = $props();
@@ -73,16 +74,19 @@
 			</button>
 		</div>
 		{#each active as a (a.id)}
-			<button class="flex w-full min-w-0 flex-col gap-0.5 rounded-lg px-3 py-2 text-left hover:bg-accent {selected === a.id ? 'bg-accent' : ''}" onclick={() => pick(a.id)} title={a.task}>
+			<div class="group relative">
+			<button class="absolute top-1.5 right-1.5 z-10 rounded p-1 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-background hover:text-foreground focus:opacity-100 max-md:opacity-100" title="Browse #{a.id}'s files" aria-label="files of #{a.id}" onclick={() => { pick(a.id); openBrowser(a.id); }}><FolderTree class="size-3.5" /></button>
+			<button class="flex w-full min-w-0 flex-col gap-0.5 rounded-lg px-3 py-2 pr-8 text-left hover:bg-accent {selected === a.id ? 'bg-accent' : ''}" onclick={() => pick(a.id)} title={a.task}>
 				<span class="flex w-full min-w-0 items-center gap-2">
 					<span class="size-2 shrink-0 rounded-full {a.status === 'running' ? 'animate-pulse bg-emerald-400' : 'bg-muted-foreground/40'}"></span>
 					<span class="truncate">{title(a.task)}</span>
 				</span>
 				<span class="flex items-center gap-1.5 pl-4 text-xs text-muted-foreground">
-					{#if a.computer}<Monitor class="size-3" />{:else}<Bot class="size-3" />{/if}
+					{#if a.computer}<Monitor class="size-3" />{:else if a.writer}<PenLine class="size-3" />{:else}<Bot class="size-3" />{/if}
 					#{a.id} · {a.status} · {ago(a.started)}
 				</span>
 			</button>
+			</div>
 		{:else}
 			<button class="w-full px-3 py-1 text-left text-xs text-muted-foreground hover:text-foreground" onclick={() => { searching = true; open = false; }}>none running · {mac ? "⌘" : "Ctrl+"}K to search all</button>
 		{/each}
